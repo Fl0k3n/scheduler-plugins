@@ -21,11 +21,11 @@ ARG ARCH
 ARG RELEASE_VERSION
 RUN RELEASE_VERSION=${RELEASE_VERSION} make build-scheduler-debug.$ARCH
 
-FROM $ARCH/alpine:3.16
+FROM golang:1.20
 
 COPY --from=0 /go/src/sigs.k8s.io/scheduler-plugins/bin/kube-scheduler /bin/kube-scheduler
-COPY --from=0 /go/bin/dlv /dlv
+COPY --from=0 /go/bin/dlv /bin/dlv
 
 WORKDIR /bin
 
-CMD ["/dlv", "--listen=:40000", "--headless=true", "--api-version=2", "--accept-multiclient", "exec", "kube-scheduler"]
+CMD ["dlv", "--listen=:40000", "--headless=true", "--api-version=2", "--accept-multiclient", "exec", "kube-scheduler"]

@@ -59,23 +59,23 @@ build-controller.arm64v8:
 
 .PHONY: build-scheduler
 build-scheduler:
-	$(COMMONENVVAR) $(BUILDENVVAR) go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler cmd/scheduler/main.go
+	$(COMMONENVVAR) $(BUILDENVVAR) go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler main.go
 
 .PHONY: build-scheduler-debug
 build-scheduler-debug:
-	$(COMMONENVVAR) $(BUILDENVVAR) go build -gcflags='all=-N -l' -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION)' -o bin/kube-scheduler cmd/scheduler/main.go
+	$(COMMONENVVAR) $(BUILDENVVAR) go build -gcflags='all=-N -l' -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION)' -o bin/kube-scheduler main.go
 
 .PHONY: build-scheduler.amd64
 build-scheduler.amd64:
-	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=amd64 go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler cmd/scheduler/main.go
+	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=amd64 go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler main.go
 
 .PHONY: build-scheduler.arm64v8
 build-scheduler.arm64v8:
-	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=arm64 go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler cmd/scheduler/main.go
+	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=arm64 go build -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION) -w' -o bin/kube-scheduler main.go
 
 .PHONY: build-scheduler-debug.amd64
 build-scheduler-debug.amd64:
-	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=amd64 go build -gcflags='all=-N -l' -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION)' -o bin/kube-scheduler cmd/scheduler/main.go
+	$(COMMONENVVAR) $(BUILDENVVAR) GOARCH=amd64 go build -gcflags='all=-N -l' -ldflags '-X k8s.io/component-base/version.gitVersion=$(VERSION)' -o bin/kube-scheduler main.go
 
 .PHONY: local-image
 local-image: clean

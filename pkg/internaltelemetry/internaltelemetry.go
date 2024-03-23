@@ -2,7 +2,6 @@ package internaltelemetry
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -53,9 +52,9 @@ func (ts *InternalTelemetry) Filter(
 	nodeInfo *framework.NodeInfo,
 ) *framework.Status {
 	klog.Infof("Filtering node %s for pod %s", nodeInfo.Node().Name, pod.Name)
-	if nodeInfo.Node().Name != "test-cluster-worker" {
+	if nodeInfo.Node().Name == "test-worker2" {
 		klog.Infof("Node %s didn't pass filter", nodeInfo.Node().Name)
-		return framework.AsStatus(errors.New("unshedulable here"))
+		return framework.NewStatus(framework.UnschedulableAndUnresolvable, "not here ;/")
 	}
 	return nil
 }
@@ -80,6 +79,22 @@ func (ts *InternalTelemetry) Score(
 	return 50, nil
 }
 
-func (ts *InternalTelemetry) ScoreExtensions() framework.ScoreExtensions {
+func (ts *InternalTelemetry) NormalizeScore(
+	ctx context.Context,
+	state *framework.CycleState,
+	p *v1.Pod,
+	scores framework.NodeScoreList,
+) *framework.Status {
+	maxScore := scores[0].Score
+	for i := range scores {
+		if scores[i].Score > maxScore {
+			maxScore = scores[0].Score
+		}
+	}
+	klog.Infof("max score: %d")
 	return nil
+}
+
+func (ts *InternalTelemetry) ScoreExtensions() framework.ScoreExtensions {
+	return ts
 }
