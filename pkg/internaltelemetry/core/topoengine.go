@@ -11,10 +11,13 @@ import (
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
 
+type Nothing struct{}
+
 type TopologyEngine struct {
 	client client.Client
 	topoReady bool
 	topo *shimv1alpha.Topology 
+	network *Network[Nothing]
 }
 
 func NewTopologyEngine(client client.Client) *TopologyEngine {
@@ -22,6 +25,7 @@ func NewTopologyEngine(client client.Client) *TopologyEngine {
 		client: client,
 		topoReady: false,
 		topo: nil,
+		network: nil,
 	}
 }
 
@@ -49,26 +53,83 @@ func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (map[string]*shimv
 		incSwitchesMap[incsw.Name] = &incsw
 	}
 	for _, dev := range t.topo.Spec.Graph {
+		if dev.DeviceType != shimv1alpha.INC_SWITCH {
+			continue
+		}
 		if _, ok := incSwitchesMap[dev.Name]; !ok {
-			return nil, fmt.Errorf("Incswitch %s was defined in topology graph but doesn't have a resource", dev.Name)
+			return nil, fmt.Errorf("incswitch %s was defined in topology graph but doesn't have a resource", dev.Name)
 		}
 	}
 	return incSwitchesMap, nil
 }
 
-func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.IncSwitch) *Network {
-	// pick any non-k8s device for root
-	root := t.topo.Spec.Graph[0]
+// build tree representation of topology graph
+// returns error if topology is not a fully-connected tree
+func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.IncSwitch) (*Network[Nothing], error) {
+	// pick any non-k8s device for root if one is available
+	rootName := t.topo.Spec.Graph[0].Name
 	for _, dev := range t.topo.Spec.Graph {
 		if dev.DeviceType != shimv1alpha.NODE {
-			root = dev
+			rootName = dev.Name
 			break
 		}
 	}
-	queue := deques.New()
-	_ = queue
-	_ = root
-	return nil
+	type devNameWithParent struct {
+		parent *Vertex[Nothing]
+		childName string
+		childIdx int
+	}
+	queue := deques.New[devNameWithParent]()
+	visitedSet := make(map[string]struct{}, len(t.topo.Spec.Graph))
+	queue.PushBack(devNameWithParent{parent: nil, childName: rootName, childIdx: -1})
+	visitedSet[rootName] = struct{}{}
+	topoMap := toMapByDeviceName(t.topo)
+	ordinalsMap := toOrdinalsByDeviceName(t.topo)
+	var root *Vertex[Nothing] = nil
+
+	for queue.Len() > 0 {
+		cur := queue.PopFront()
+		curDev := topoMap[cur.childName]
+		vertex := &Vertex[Nothing]{
+			Name: curDev.Name,
+			Ordinal: ordinalsMap[curDev.Name],
+			DeviceType: curDev.DeviceType,
+			Children: nil,
+			Parent: cur.parent,
+		}
+		numChildren := len(curDev.Links)
+		if cur.parent == nil {
+			root = vertex
+		} else {
+			cur.parent.Children[cur.childIdx] = vertex
+			numChildren--
+		}
+		if numChildren > 0 {
+			childCounter := 0
+			vertex.Children = make([]*Vertex[Nothing], numChildren)
+			for _, link := range curDev.Links {
+				if cur.parent == nil || link.PeerName != cur.parent.Name {
+					if _, ok := visitedSet[link.PeerName]; ok {
+						return nil, fmt.Errorf("topology is not a tree, %s", link.PeerName)
+					}
+					visitedSet[link.PeerName] = struct{}{}
+					queue.PushBack(devNameWithParent{
+						parent: vertex,
+						childName: link.PeerName,
+						childIdx: childCounter,
+					})
+					childCounter++
+				}
+			}
+		}
+	}
+	if len(visitedSet) != len(t.topo.Spec.Graph) {
+		return nil, fmt.Errorf("topology is not fully connected")
+	}
+	res := newNetwork[Nothing](root, incswitches)
+	res.Vertices = map[string]*Vertex[Nothing]{}
+	res.IterNodes(func(v *Vertex[Nothing]) {res.Vertices[v.Name] = v})
+	return res, nil
 }
 
 func (t *TopologyEngine) InitTopologyState(ctx context.Context) error {
@@ -79,7 +140,11 @@ func (t *TopologyEngine) InitTopologyState(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = t.buildNetworkRepr(incswitches)
+	net, err := t.buildNetworkRepr(incswitches)
+	if err != nil {
+		return err
+	}
+	t.network = net
 
 	t.topoReady = true
 	return nil
