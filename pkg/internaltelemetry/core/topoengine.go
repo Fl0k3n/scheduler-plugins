@@ -156,12 +156,12 @@ func (t *TopologyEngine) WatchTopologyChanges(ctx context.Context) error {
 	return nil
 }
 
-func (t *TopologyEngine) PrepareForScheduling(ctx context.Context, pod *v1.Pod) error {
+func (t *TopologyEngine) PrepareForScheduling(ctx context.Context, pod *v1.Pod) (*Network[Nothing], error) {
 	if !t.topoReady {
 		if err := t.InitTopologyState(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return t.network, nil
 }
 

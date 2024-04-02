@@ -64,6 +64,14 @@ func (n *Network[T]) IterNodes(consumer func(v *Vertex[T])) {
 	}
 }
 
+func (n *Network[T]) IterVerticesOfType(deviceType shimv1alpha.DeviceType, consumer func (v *Vertex[T])) {
+	n.IterNodes(func(v *Vertex[T]) {
+		if v.DeviceType == deviceType {
+			consumer(v)
+		}
+	})
+}
+
 // only tree is deepcopied
 func mapDeepCopy[From any, To any](network *Network[From], metaProvider func(v *Vertex[From]) To) *Network[To] {
 	if network.Root == nil {
@@ -107,6 +115,24 @@ func mapDeepCopy[From any, To any](network *Network[From], metaProvider func(v *
 	return res
 }
 
+type NetworkMetadataSnapshot [T any] struct {
+	snapshot []T
+}
+
+func (n *Network[T]) TakeMetadataSnapshot(copier func(T) T) NetworkMetadataSnapshot[T] {
+	snapshot := make([]T, len(n.Vertices))
+	n.IterNodes(func(v *Vertex[T]) {
+		snapshot[v.Ordinal] = copier(v.Meta)
+	})
+	return NetworkMetadataSnapshot[T]{snapshot}
+}
+
+func (n *Network[T]) RestoreMetadataFromSnapshot(snapshot NetworkMetadataSnapshot[T]) {
+	n.IterNodes(func(v *Vertex[T]) {
+		v.Meta = snapshot.snapshot[v.Ordinal]
+	})
+}
+
 type TelemetryPortsMeta struct {
 	AvailableTelemetryPorts map[string]struct{}
 }
@@ -114,4 +140,8 @@ type TelemetryPortsMeta struct {
 func (t *TelemetryPortsMeta) IsPortUnallocated(peerName string) bool {
 	_, unallocated := t.AvailableTelemetryPorts[peerName]
 	return unallocated
+}
+
+func (t *TelemetryPortsMeta) AllocatePort(peerName string) {
+	delete(t.AvailableTelemetryPorts, peerName)
 }

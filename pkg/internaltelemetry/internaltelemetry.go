@@ -48,7 +48,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	}
 	topoEngine := core.NewTopologyEngine(client)
 	deplMgr := core.NewDeploymentManager(client)
-	schedEngine := core.NewTelemetrySchedulingEngine()
+	schedEngine := core.NewTelemetrySchedulingEngine(core.DefaultTelemetrySchedulingEngineConfig())
 
 	return &InternalTelemetry{
 		Client: client,
@@ -70,13 +70,17 @@ func (ts *InternalTelemetry) PreFilter(
 	pod *v1.Pod,
 ) (*framework.PreFilterResult, *framework.Status) {
 	var err error
-	if err = ts.topoEngine.PrepareForScheduling(ctx, pod); err != nil {
+	var network *core.Network[core.Nothing]
+	var intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
+	var podsDeplName string
+	if network, err = ts.topoEngine.PrepareForScheduling(ctx, pod); err != nil {
 		goto fail
 	}
-	if err = ts.deplMgr.PrepareForPodScheduling(ctx, pod); err != nil {
+	if intdepl, podsDeplName, err = ts.deplMgr.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
 	}
-	ts.schedEngine.PrepareForScheduling()
+	_ = podsDeplName // TOOD
+	ts.schedEngine.PrepareForScheduling(network, intdepl.Name)
 	return nil, nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)

@@ -7,6 +7,13 @@ type ScheduledNode struct {
 	ScheduledDeployments []string
 }
 
+func (s *ScheduledNode) DeepCopy() ScheduledNode {
+	return ScheduledNode{
+		Name: s.Name,
+		ScheduledDeployments: slices.Clone(s.ScheduledDeployments),
+	}
+}
+
 func (s *ScheduledNode) MarkScheduled(deplName string) {
 	for _, sd := range s.ScheduledDeployments {
 		if sd == deplName {

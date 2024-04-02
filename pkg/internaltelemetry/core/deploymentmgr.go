@@ -26,30 +26,31 @@ func NewDeploymentManager(client client.Client) *DeploymentManager {
 	}
 }
 
-func (d *DeploymentManager) PrepareForPodScheduling(ctx context.Context, pod *v1.Pod) error {
+func (d *DeploymentManager) PrepareForPodScheduling(
+	ctx context.Context,
+	pod *v1.Pod,
+) (intdepl *intv1alpha.InternalInNetworkTelemetryDeployment, podsDeplName string, erro error) {
 	iintdeplName, okIintdepl := pod.Labels[INTERNAL_TELEMETRY_POD_INTDEPL_NAME_LABEL]
 	deploymentName, okDepl := pod.Labels[INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL]
 	_ = deploymentName
 	if !okIintdepl || !okDepl {
-		return fmt.Errorf("pod %s is not a part of iintdeployment", pod.Name)
+		return nil, "", fmt.Errorf("pod %s is not a part of iintdeployment", pod.Name)
 	}
-	var intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
+	intdepl = &intv1alpha.InternalInNetworkTelemetryDeployment{}
 	iintdeplKey := types.NamespacedName{Name: iintdeplName, Namespace: pod.Namespace}
 	if idepl, ok := d.iintdeplCache.Load(iintdeplKey); ok {
 		intdepl = idepl.(*intv1alpha.InternalInNetworkTelemetryDeployment)
 	} else {
 		intdepl = &intv1alpha.InternalInNetworkTelemetryDeployment{}
 		if err := d.client.Get(ctx, iintdeplKey, intdepl); err != nil {
-			return err
+			return nil, "", err
 		}
 		d.iintdeplCache.Store(iintdeplKey, intdepl)
 	}
-	
-	_ = intdepl
-	return nil
+	return intdepl, deploymentName, nil
 }
 
 
-func (d *DeploymentManager) onAllScheduled() {
+func (d *DeploymentManager) OnAllScheduled() {
 	// clear cache
 }

@@ -17,3 +17,11 @@ func toOrdinalsByDeviceName(topo *shimv1alpha.Topology) map[string]int {
 	}
 	return res
 }
+
+func deepCopyScheduledNodes(sns []ScheduledNode) []ScheduledNode {
+	res := make([]ScheduledNode, len(sns))
+	for i, sn := range sns {
+		res[i] = sn.DeepCopy()
+	}
+	return res
+}
