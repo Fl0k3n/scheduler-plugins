@@ -51,8 +51,12 @@ func newNetwork[T any](
 	}
 }
 
-func (n *Network[T]) IterNodes(consumer func(v *Vertex[T])) {
+func (n *Network[T]) IterVertices(consumer func(v *Vertex[T])) {
+	if n.Root == nil {
+		return
+	}
 	queue := deque.New[*Vertex[T]]()
+	queue.PushBack(n.Root)
 	for queue.Len() > 0 {
 		cur := queue.PopFront()
 		consumer(cur)
@@ -65,7 +69,7 @@ func (n *Network[T]) IterNodes(consumer func(v *Vertex[T])) {
 }
 
 func (n *Network[T]) IterVerticesOfType(deviceType shimv1alpha.DeviceType, consumer func (v *Vertex[T])) {
-	n.IterNodes(func(v *Vertex[T]) {
+	n.IterVertices(func(v *Vertex[T]) {
 		if v.DeviceType == deviceType {
 			consumer(v)
 		}
@@ -101,6 +105,7 @@ func mapDeepCopy[From any, To any](network *Network[From], metaProvider func(v *
 			res.Root = copied
 		}
 		if !cur.originalChild.IsLeaf() {
+			copied.Children = make([]*Vertex[To], len(cur.originalChild.Children))
 			for i, child := range cur.originalChild.Children {
 				queue.PushBack(childWithParent{
 					copiedParent: copied,
@@ -111,7 +116,7 @@ func mapDeepCopy[From any, To any](network *Network[From], metaProvider func(v *
 		}
 	}
 	res.Vertices = make(map[string]*Vertex[To], len(network.Vertices))
-	res.IterNodes(func(v *Vertex[To]) {res.Vertices[v.Name] = v})
+	res.IterVertices(func(v *Vertex[To]) {res.Vertices[v.Name] = v})
 	return res
 }
 
@@ -121,14 +126,14 @@ type NetworkMetadataSnapshot [T any] struct {
 
 func (n *Network[T]) TakeMetadataSnapshot(copier func(T) T) NetworkMetadataSnapshot[T] {
 	snapshot := make([]T, len(n.Vertices))
-	n.IterNodes(func(v *Vertex[T]) {
+	n.IterVertices(func(v *Vertex[T]) {
 		snapshot[v.Ordinal] = copier(v.Meta)
 	})
 	return NetworkMetadataSnapshot[T]{snapshot}
 }
 
 func (n *Network[T]) RestoreMetadataFromSnapshot(snapshot NetworkMetadataSnapshot[T]) {
-	n.IterNodes(func(v *Vertex[T]) {
+	n.IterVertices(func(v *Vertex[T]) {
 		v.Meta = snapshot.snapshot[v.Ordinal]
 	})
 }

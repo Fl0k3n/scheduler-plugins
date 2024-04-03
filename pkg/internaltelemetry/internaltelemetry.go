@@ -11,7 +11,6 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 	"sigs.k8s.io/scheduler-plugins/pkg/internaltelemetry/core"
 	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
@@ -39,7 +38,6 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	scheme := runtime.NewScheme()
 	_ = clientscheme.AddToScheme(scheme)
 	_ = v1.AddToScheme(scheme)
-	_ = v1alpha1.AddToScheme(scheme)
 	_ = shimv1alpha.AddToScheme(scheme)
 	_ = intv1alpha.AddToScheme(scheme)
 	client, err := client.New(handle.KubeConfig(), client.Options{Scheme: scheme})
@@ -80,7 +78,7 @@ func (ts *InternalTelemetry) PreFilter(
 		goto fail
 	}
 	_ = podsDeplName // TOOD
-	ts.schedEngine.PrepareForScheduling(network, intdepl.Name)
+	ts.schedEngine.PrepareForScheduling(network, intdepl.Name, []core.ScheduledNode{}) // TODO we need tracker of scheduled nodes
 	return nil, nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)

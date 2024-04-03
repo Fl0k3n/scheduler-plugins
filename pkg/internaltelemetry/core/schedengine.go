@@ -33,34 +33,53 @@ func NewTelemetrySchedulingEngine(config TelemetrySchedulingEngineConfig) *Telem
 	}
 }
 
-func (t *TelemetrySchedulingEngine) PrepareForScheduling(network *Network[Nothing], intdeplName string) {
+func (t *TelemetrySchedulingEngine) PrepareForScheduling(
+	network *Network[Nothing],
+	intdeplName string,
+	previouslyScheduleNodes []ScheduledNode,
+) {
 	if _, ok := t.deploymentNetworkCache[intdeplName]; ok {
 		// TODO check if cached version matches current once network is mutable
 		return
 	}
-	deploymentsNetworkView := mapDeepCopy[Nothing, TelemetryPortsMeta](network, func(v *Vertex[Nothing]) TelemetryPortsMeta {
+	deploymentsNetworkView := mapDeepCopy(network, func(v *Vertex[Nothing]) TelemetryPortsMeta {
 		if _, ok := network.TelemetryEnabledSwitches[v.Name]; ok {
 			neighbors := v.Neighbors()
 			res := make(map[string]struct{}, len(neighbors))
 			for _, neighbor := range neighbors {
 				res[neighbor.Name] = struct{}{}
 			}
+			return TelemetryPortsMeta{AvailableTelemetryPorts: res}
 		}
 		return TelemetryPortsMeta{AvailableTelemetryPorts: map[string]struct{}{}}
 	})
-	// TODO check if some pods have already been scheduled (e.g. if sched crashed) and remove ports
 	t.deploymentNetworkCache[intdeplName] = deploymentsNetworkView
+	if len(previouslyScheduleNodes) > 0 {
+		// this can happen if sched crashed or in tests where we don't have cached 
+		// network state but some pods of this deployment have already been scheduled
+		virtualScheduledNodes := []ScheduledNode{}
+		for _, sn := range previouslyScheduleNodes {
+			for _, depl := range sn.ScheduledDeployments {
+				v := deploymentsNetworkView.Vertices[sn.Name]
+				virtualScheduledNodes = t.markScheduled(deploymentsNetworkView, virtualScheduledNodes, depl, v)
+			}
+		}
+	}
 }
 
 // count is performed based on network metadata, not actual flow tracing
-func (t *TelemetrySchedulingEngine) countCoveredPorts(network *Network[TelemetryPortsMeta]) int {
-	res := 0
-	network.IterVerticesOfType(shimv1alpha.INC_SWITCH, func(v *Vertex[TelemetryPortsMeta]) {
-		if _, hasTelemetryEnabled := network.TelemetryEnabledSwitches[v.Name]; hasTelemetryEnabled {
-			res += len(v.Neighbors()) - len(v.Meta.AvailableTelemetryPorts)
-		}
-	})
-	return res
+// func (t *TelemetrySchedulingEngine) countCoveredPorts(network *Network[TelemetryPortsMeta]) int {
+// 	res := 0
+// 	network.IterVerticesOfType(shimv1alpha.INC_SWITCH, func(v *Vertex[TelemetryPortsMeta]) {
+// 		if _, hasTelemetryEnabled := network.TelemetryEnabledSwitches[v.Name]; hasTelemetryEnabled {
+// 			res += len(v.Neighbors()) - len(v.Meta.AvailableTelemetryPorts)
+// 		}
+// 	})
+// 	return res
+// }
+
+func (t *TelemetrySchedulingEngine) getCachedDeploymentsNetworkView(intdeplName string) *Network[TelemetryPortsMeta] {
+	return t.deploymentNetworkCache[intdeplName]	
 }
 
 func (t *TelemetrySchedulingEngine) getGreedyBestNodeToSchedule(
@@ -95,6 +114,7 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 	var dfs func(*Vertex[TelemetryPortsMeta], bool) (bool, bool)
 	dfs = func(cur *Vertex[TelemetryPortsMeta], foundTelemetrySwitchBefore bool) (leadsToTarget bool, foundTelemetrySwitchAfter bool) {
 		visited[cur.Ordinal] = true
+		foundTelemetrySwitchAfter = false
 		if cur.DeviceType == shimv1alpha.NODE {
 			_, leadsToTarget = targets[cur.Name]	
 			return
@@ -103,14 +123,19 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 		for _, neigh := range cur.Neighbors() {
 			if !visited[neigh.Ordinal] {
 				neighHadTelemetryOnRoute := foundTelemetrySwitchBefore || hasTelemetryEnabled
-				if neighLeadsToTarget, foundTelemetrySwitchAfter := dfs(neigh, neighHadTelemetryOnRoute); neighLeadsToTarget {
+				neighLeadsToTarget, foundTelemetryAfter := dfs(neigh, neighHadTelemetryOnRoute)
+				if neighLeadsToTarget {
 					leadsToTarget = true
-					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetrySwitchAfter
+					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetryAfter
 					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
 						cur.Meta.AllocatePort(neigh.Name)
 					}
 				}
+				foundTelemetrySwitchAfter = foundTelemetrySwitchAfter || foundTelemetryAfter
 			}
+		}
+		if hasTelemetryEnabled {
+			foundTelemetrySwitchAfter = true
 		}
 		return
 	}
@@ -227,7 +252,7 @@ func (t *TelemetrySchedulingEngine) getNodesWithPodsOfOtherDeployment(
 	return res
 }
 
-func (t *TelemetrySchedulingEngine) isAlreadyScheduled(nodeName string, scheduledNodes []ScheduledNode, podsDeploymentName string) bool {
+func (t *TelemetrySchedulingEngine) isDeploymentMemberAlreadyScheduledOnNode(nodeName string, scheduledNodes []ScheduledNode, podsDeploymentName string) bool {
 	var node ScheduledNode
 	for _, node = range scheduledNodes {
 		if nodeName == node.Name {
@@ -245,7 +270,7 @@ func (t *TelemetrySchedulingEngine) ComputeNodeSchedulingScore(
 	scheduledNodes []ScheduledNode,
 	queuedPods QueuedPods,
 ) int {
-	if t.isAlreadyScheduled(nodeName, scheduledNodes, podsDeploymentName) {
+	if t.isDeploymentMemberAlreadyScheduledOnNode(nodeName, scheduledNodes, podsDeploymentName) {
 		return 0
 	}
 	network := t.deploymentNetworkCache[intdeplName]

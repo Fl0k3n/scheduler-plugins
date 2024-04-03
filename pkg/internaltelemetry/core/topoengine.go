@@ -126,13 +126,13 @@ func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.In
 	if len(visitedSet) != len(t.topo.Spec.Graph) {
 		return nil, fmt.Errorf("topology is not fully connected")
 	}
-	res := newNetwork[Nothing](root, incswitches)
+	res := newNetwork(root, incswitches)
 	res.Vertices = map[string]*Vertex[Nothing]{}
-	res.IterNodes(func(v *Vertex[Nothing]) {res.Vertices[v.Name] = v})
+	res.IterVertices(func(v *Vertex[Nothing]) {res.Vertices[v.Name] = v})
 	return res, nil
 }
 
-func (t *TopologyEngine) InitTopologyState(ctx context.Context) error {
+func (t *TopologyEngine) initTopologyState(ctx context.Context) error {
 	if err := t.loadTopology(ctx); err != nil {
 		return err
 	}
@@ -145,7 +145,6 @@ func (t *TopologyEngine) InitTopologyState(ctx context.Context) error {
 		return err
 	}
 	t.network = net
-
 	t.topoReady = true
 	return nil
 }
@@ -158,7 +157,7 @@ func (t *TopologyEngine) WatchTopologyChanges(ctx context.Context) error {
 
 func (t *TopologyEngine) PrepareForScheduling(ctx context.Context, pod *v1.Pod) (*Network[Nothing], error) {
 	if !t.topoReady {
-		if err := t.InitTopologyState(ctx); err != nil {
+		if err := t.initTopologyState(ctx); err != nil {
 			return nil, err
 		}
 	}
