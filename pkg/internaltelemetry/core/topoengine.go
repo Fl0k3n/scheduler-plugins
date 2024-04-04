@@ -7,9 +7,12 @@ import (
 
 	deques "github.com/gammazero/deque"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
+
+const TELEMETRY_INTERFACE = "inc.kntp.com/v1alpha1/telemetry"
 
 type Nothing struct{}
 
@@ -41,16 +44,35 @@ func (t *TopologyEngine) loadTopology(ctx context.Context) error {
 	return nil
 }
 
+func (t *TopologyEngine) hasTelemetryEnabled(sw *shimv1alpha.IncSwitch, program *shimv1alpha.P4Program) bool {
+	canBeInstalled := false
+	for _, artifact := range program.Spec.Artifacts {
+		if artifact.Arch == sw.Spec.Arch {
+			canBeInstalled = true
+			break
+		}
+	}
+	if !canBeInstalled {
+		return false
+	}
+	for _, implementedInterface := range program.Spec.ImplementedInterfaces {
+		if implementedInterface == TELEMETRY_INTERFACE {
+			return true
+		}
+	}
+	return false
+}
+
 // we require every device of type incswitch declared in Topology resource to have 
-// its incSwitch resource for this to succeed
-func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (map[string]*shimv1alpha.IncSwitch, error){
+// its incSwitch resource for this to succeed, also all declared programs must be created
+func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (telemetryEnabledSwitches map[string]*shimv1alpha.IncSwitch, erro error){
 	incswitches := &shimv1alpha.IncSwitchList{}
 	if err := t.client.List(ctx, incswitches); err != nil {
 		return nil, err
 	}
 	incSwitchesMap := make(map[string]*shimv1alpha.IncSwitch, len(incswitches.Items))
-	for _, incsw := range incswitches.Items {
-		incSwitchesMap[incsw.Name] = &incsw
+	for i, incsw := range incswitches.Items {
+		incSwitchesMap[incsw.Name] = &incswitches.Items[i]
 	}
 	for _, dev := range t.topo.Spec.Graph {
 		if dev.DeviceType != shimv1alpha.INC_SWITCH {
@@ -60,7 +82,29 @@ func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (map[string]*shimv
 			return nil, fmt.Errorf("incswitch %s was defined in topology graph but doesn't have a resource", dev.Name)
 		}
 	}
-	return incSwitchesMap, nil
+	telemetryEnabledSwitches = make(map[string]*shimv1alpha.IncSwitch)
+	programs := map[string]*shimv1alpha.P4Program{}
+	for _, incswitch := range incSwitchesMap {
+		programName := incswitch.Spec.ProgramName
+		if programName == "" {
+			continue
+		}
+		var program *shimv1alpha.P4Program
+		var loaded bool
+		program, loaded = programs[programName]
+		if !loaded {
+			program = &shimv1alpha.P4Program{}
+			key := types.NamespacedName{Name: programName, Namespace: t.topo.Namespace}
+			if err := t.client.Get(ctx, key, program); err != nil {
+				return nil, err
+			}
+			programs[programName] = program
+		}
+		if t.hasTelemetryEnabled(incswitch, program) {
+			telemetryEnabledSwitches[incswitch.Name] = incswitch
+		}
+	}
+	return telemetryEnabledSwitches, nil
 }
 
 // build tree representation of topology graph

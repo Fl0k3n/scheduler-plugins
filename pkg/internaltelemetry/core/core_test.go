@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -21,28 +22,28 @@ func TestTopologyEngine(t *testing.T) {
 		name              string
 		pod 			  *v1.Pod	
 		topology		  *shimv1alpha.Topology
-		telemetrySwitches []*shimv1alpha.IncSwitch
-		wantError              bool
+		telemetrySwitches []string
+		wantError         bool
 	}{
 		{
 			name: "preparation fails when there is no topology",
 			pod: st.MakePod().Name("p1").UID("p1").Namespace("ns1").Obj(),
 			topology: nil,
-			telemetrySwitches: []*shimv1alpha.IncSwitch{},
+			telemetrySwitches: []string{},
 			wantError: true,
 		},
 		{
 			name: "preparation succeeds for tree topology",
 			pod: st.MakePod().Name("p1").UID("p1").Namespace("ns1").Obj(),
 			topology: testTopology("shallow"),
-			telemetrySwitches: makeTestIncSwitches("r0", "r1", "r2"),
+			telemetrySwitches: []string{"r0", "r1", "r2"},
 			wantError: false,
 		},
 		{
 			name: "preparation fails for not-tree topology",
 			pod: st.MakePod().Name("p1").UID("p1").Namespace("ns1").Obj(),
 			topology: withExtraEdges(testTopology("shallow"), edge{"r1", "r2"}),
-			telemetrySwitches: makeTestIncSwitches("r0", "r1", "r2"),
+			telemetrySwitches: []string{"r0", "r1", "r2"},
 			wantError: true,
 		},
 		{
@@ -59,7 +60,7 @@ func TestTopologyEngine(t *testing.T) {
 					{"r0", "n0"},
 				},
 			),
-			telemetrySwitches: []*shimv1alpha.IncSwitch{},
+			telemetrySwitches: []string{},
 			wantError: false,
 		},
 	}
@@ -70,8 +71,8 @@ func TestTopologyEngine(t *testing.T) {
 				objs = append(objs, tt.topology)
 			}
 			objs = append(objs, tt.pod)
-			for _, sw := range tt.telemetrySwitches {
-				objs = append(objs, sw)
+			if tt.topology != nil {
+				objs = append(objs, makeTestIncSwitchesForTopo(tt.topology, tt.telemetrySwitches)...)
 			}
 			client := newFakeClient(t, objs...)
 
@@ -145,8 +146,8 @@ func TestScoringEngine(t *testing.T) {
 			res.Spec.DeploymentTemplates[1].Template.Replicas = &second
 			return res
 		}
-		allV4IncSwitches := func() []*shimv1alpha.IncSwitch {
-			return makeTestIncSwitches("r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7")
+		allV4IncSwitches := func() []string {
+			return []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"}
 		}
 		schedule := func (what string, where ...string) []ScheduledNode {
 			res := []ScheduledNode{}
@@ -175,7 +176,7 @@ func TestScoringEngine(t *testing.T) {
 		tests := []struct {
 			name                string
 			topo 				*shimv1alpha.Topology
-			telemetrySwitches   []*shimv1alpha.IncSwitch
+			telemetrySwitches   []string
 			pod 			    *v1.Pod
 			intdepl 		    *intv1alpha.InternalInNetworkTelemetryDeployment
 			scheduledNodes      []ScheduledNode
@@ -190,8 +191,16 @@ func TestScoringEngine(t *testing.T) {
 				scheduledNodes: []ScheduledNode{},
 				expectedUsedPorts: []switchPort{},
 			},
+			{
+				name: "no ports are used when pods of only 1 deployment were scheduled",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: allV4IncSwitches(),
+				pod: depl1Pod,
+				intdepl: intDepl(2, 2),
+				scheduledNodes: schedule("depl2", "w1", "w4"),
+			},
 			{	
-				name: "all ports on path between only path between 2 pods of different deployments are used",
+				name: "all ports on path between between 2 pods of different deployments are used",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: allV4IncSwitches(),
 				pod: depl1Pod,
@@ -206,14 +215,59 @@ func TestScoringEngine(t *testing.T) {
 					{"r7", "w4", false},
 				},
 			},
+			{	
+				name: "many-to-many communication paths are used",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: allV4IncSwitches(),
+				pod: depl1Pod,
+				intdepl: intDepl(3, 2),
+				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4", "w5")),
+				expectedUsedPorts: []switchPort{
+					{"r5", "w1", false},
+					{"r5", "r1", true},
+					{"r1", "r0", true},
+					{"r0", "r3", true},
+					{"r3", "r7", true},
+					{"r7", "w4", false},
+					{"r0", "r4", true},
+					{"r0", "r2", true},
+					{"r4", "w5", false},
+					{"r6", "w3", false},
+					{"r6", "r2", true},
+					{"r6", "r0", true},
+				},
+			},
+			{	
+				name: "only telemetry-enabled switches have used ports",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r3", "r6"},
+				pod: depl1Pod,
+				intdepl: intDepl(3, 2),
+				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4")),
+				expectedUsedPorts: []switchPort{
+					{"r1", "r5", false},
+					{"r1", "r0", false},
+					{"r3", "r0", false},
+					{"r3", "r7", false},
+					{"r6", "w3", false},
+					{"r6", "r2", false},
+				},
+			},
+			{
+				name: "1 telemetry switch on route is not enough to setup telemetry",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r5"},
+				pod: depl1Pod,
+				intdepl: intDepl(2, 2),
+				scheduledNodes: merge(schedule("depl1", "w1"), schedule("depl2", "w2")),
+				expectedUsedPorts: []switchPort{},
+			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				sched := NewTelemetrySchedulingEngine(DefaultTelemetrySchedulingEngineConfig())
 				objs := []runtime.Object{tt.topo, tt.pod, tt.intdepl}
-				for _, sw := range tt.telemetrySwitches {
-					objs = append(objs, sw)
-				}
+				objs = append(objs, makeTestIncSwitchesForTopo(tt.topo, tt.telemetrySwitches)...)
 				client := newFakeClient(t, objs...)
 				topoEngine := NewTopologyEngine(client)
 				ctx := context.Background()
@@ -233,15 +287,7 @@ func TestScoringEngine(t *testing.T) {
 					return false
 				}
 				for _, v := range repr.Vertices {
-					mustHaveNoTelemetryPorts := true
-					if v.DeviceType == shimv1alpha.INC_SWITCH {
-						for _, telemetrySw := range tt.telemetrySwitches {
-							if telemetrySw.Name == v.Name {
-								mustHaveNoTelemetryPorts = false
-								break
-							}
-						}
-					}
+					mustHaveNoTelemetryPorts := slices.Index(tt.telemetrySwitches, v.Name) == -1
 					if mustHaveNoTelemetryPorts {
 						if len(v.Meta.AvailableTelemetryPorts) > 0 {
 							t.Errorf("Expected %s to have no availabe ports, but got: %v", v.Name, v.Meta.AvailableTelemetryPorts)
@@ -263,7 +309,7 @@ func TestScoringEngine(t *testing.T) {
 		}
 	})
 
-	t.Run("", func(t *testing.T) {
+	t.Run("sched correctly scores nodes", func(t *testing.T) {
 		tests := []struct {
 			name                string
 			topo 				*shimv1alpha.Topology
@@ -336,24 +382,34 @@ func makeTestTopology(vertices []vertex, edges []edge) *shimv1alpha.Topology {
 	}
 }
 
-func makeTestIncSwitch(name string) *shimv1alpha.IncSwitch {
+func makeTestP4Program(name string, arch string, implementsTelemetry bool) *shimv1alpha.P4Program {
+	implementedInterfaces := []string{}
+	if implementsTelemetry {
+		implementedInterfaces = append(implementedInterfaces, TELEMETRY_INTERFACE)
+	}
+	return &shimv1alpha.P4Program{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: shimv1alpha.P4ProgramSpec{
+			Artifacts: []shimv1alpha.ProgramArtifacts{
+				{Arch: arch},
+			},
+			ImplementedInterfaces: implementedInterfaces,
+		},
+	}
+}
+
+func makeTestIncSwitch(name string, arch string, programName string) *shimv1alpha.IncSwitch {
 	return &shimv1alpha.IncSwitch{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},		
 		Spec: shimv1alpha.IncSwitchSpec{
-			Arch: "foo",
-			ProgramName: "bar",
+			Arch: arch,
+			ProgramName: programName,
 		},
 	}
-}
-
-func makeTestIncSwitches(names ...string) []*shimv1alpha.IncSwitch {
-	res := []*shimv1alpha.IncSwitch{}
-	for _, name := range names {
-		res = append(res, makeTestIncSwitch(name))
-	}
-	return res
 }
 
 type deploymentInfo struct {
@@ -421,15 +477,45 @@ func newFakeClient(t *testing.T, objs ...runtime.Object) client.Client {
 func withExtraEdges(topo *shimv1alpha.Topology, edges ...edge) *shimv1alpha.Topology {
 	t := topo.DeepCopy()
 	for _, e := range edges {
-		for _, v := range t.Spec.Graph {
+		for i, v := range t.Spec.Graph {
 			if v.Name == e.u {
-				v.Links = append(v.Links, shimv1alpha.Link{PeerName: e.v})
+				t.Spec.Graph[i].Links = append(t.Spec.Graph[i].Links, shimv1alpha.Link{PeerName: e.v})
 			} else if v.Name == e.v {
-				v.Links = append(v.Links, shimv1alpha.Link{PeerName: e.u})
+				t.Spec.Graph[i].Links = append(t.Spec.Graph[i].Links, shimv1alpha.Link{PeerName: e.u})
 			}
 		}
 	}
 	return t
+}
+
+func makeTestIncSwitchesForTopo(topo *shimv1alpha.Topology, telemetrySwitches []string) []runtime.Object {
+	telemetryProgram := makeTestP4Program("telemetry", "bmv2", true)
+	nonTelemetryProgram := makeTestP4Program("foo", "bmv2", false)
+	res := makeTestIncSwitchesForTopoWithCustomPrograms(topo, nonTelemetryProgram, telemetryProgram, telemetrySwitches)
+	res = append(res, telemetryProgram)
+	res = append(res, nonTelemetryProgram)
+	return res
+}
+
+func makeTestIncSwitchesForTopoWithCustomPrograms(
+	topo *shimv1alpha.Topology,
+	defaultProgram *shimv1alpha.P4Program, 
+	telemetryProgram *shimv1alpha.P4Program,
+	telemetrySwiches []string,
+) []runtime.Object {
+	res := []runtime.Object{}
+	for _, dev := range topo.Spec.Graph {
+		if dev.DeviceType == shimv1alpha.INC_SWITCH {
+			var incSwitch *shimv1alpha.IncSwitch
+			if slices.Index(telemetrySwiches, dev.Name) == -1 {
+				incSwitch = makeTestIncSwitch(dev.Name, defaultProgram.Spec.Artifacts[0].Arch, defaultProgram.Name)
+			} else {
+				incSwitch = makeTestIncSwitch(dev.Name, telemetryProgram.Spec.Artifacts[0].Arch, telemetryProgram.Name)
+			}
+			res = append(res, incSwitch)
+		}
+	}
+	return res
 }
 
 func testTopology(variant string) *shimv1alpha.Topology {
@@ -466,7 +552,7 @@ func testTopology(variant string) *shimv1alpha.Topology {
 			},
 		)
 	case "v4-tree":
-		// matches kinda-sdn v4 topo, but without control plane node
+		// matches kinda-sdn v4 topo, but worker node w5 is used in place of control plane node c1
 		return makeTestTopology(
 			[]vertex{
 				{"external", shimv1alpha.EXTERNAL},
@@ -482,6 +568,7 @@ func testTopology(variant string) *shimv1alpha.Topology {
 				{"w2", shimv1alpha.NODE},
 				{"w3", shimv1alpha.NODE},
 				{"w4", shimv1alpha.NODE},
+				{"w5", shimv1alpha.NODE},
 			},
 			[]edge{
 				{"external", "r0"},
@@ -496,6 +583,7 @@ func testTopology(variant string) *shimv1alpha.Topology {
 				{"r5", "w2"},
 				{"r6", "w3"},
 				{"r7", "w4"},
+				{"r4", "w5"},
 			},
 		)
 	default:

@@ -111,8 +111,8 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 		visited[i] = false
 	}
 	targets := t.getNodesWithPodsOfOtherDeployment(deplName, scheduledNodes)
-	var dfs func(*Vertex[TelemetryPortsMeta], bool) (bool, bool)
-	dfs = func(cur *Vertex[TelemetryPortsMeta], foundTelemetrySwitchBefore bool) (leadsToTarget bool, foundTelemetrySwitchAfter bool) {
+	var dfs func(*Vertex[TelemetryPortsMeta], *Vertex[TelemetryPortsMeta], bool) (bool, bool)
+	dfs = func(cur *Vertex[TelemetryPortsMeta], prev *Vertex[TelemetryPortsMeta], foundTelemetrySwitchBefore bool) (leadsToTarget bool, foundTelemetrySwitchAfter bool) {
 		visited[cur.Ordinal] = true
 		foundTelemetrySwitchAfter = false
 		if cur.DeviceType == shimv1alpha.NODE {
@@ -123,12 +123,15 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 		for _, neigh := range cur.Neighbors() {
 			if !visited[neigh.Ordinal] {
 				neighHadTelemetryOnRoute := foundTelemetrySwitchBefore || hasTelemetryEnabled
-				neighLeadsToTarget, foundTelemetryAfter := dfs(neigh, neighHadTelemetryOnRoute)
+				neighLeadsToTarget, foundTelemetryAfter := dfs(neigh, cur, neighHadTelemetryOnRoute)
 				if neighLeadsToTarget {
 					leadsToTarget = true
 					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetryAfter
 					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
 						cur.Meta.AllocatePort(neigh.Name)
+					}
+					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(prev.Name) && areOtherSwitchesOnRoute {
+						cur.Meta.AllocatePort(prev.Name)
 					}
 				}
 				foundTelemetrySwitchAfter = foundTelemetrySwitchAfter || foundTelemetryAfter
@@ -157,7 +160,7 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 		return scheduledNodes
 	}
 	visited[nodeVertex.Ordinal] = true
-	dfs(nodeVertex.Parent, false)
+	dfs(nodeVertex.Parent, nodeVertex, false)
 	return scheduledNodes
 }
 
@@ -201,9 +204,10 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 	}
 	targetNodes := t.getNodesWithPodsOfOtherDeployment(podsDeploymentName, previouslyScheduledNodes)
 	
-	var dfs func(*Vertex[TelemetryPortsMeta], bool) (bool, int, bool)
+	var dfs func(*Vertex[TelemetryPortsMeta], *Vertex[TelemetryPortsMeta], bool) (bool, int, bool)
 	dfs = func(
 		cur *Vertex[TelemetryPortsMeta],
+		prev *Vertex[TelemetryPortsMeta],
 		foundTelemetrySwitchBefore bool,
 	) (leadsToTarget bool, numPortsInDescendats int, foundTelemetrySwitchAfter bool) {
 		visited[cur.Ordinal] = true
@@ -215,14 +219,21 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 			return
 		}
 		_, hasTelemetryEnabled := network.TelemetryEnabledSwitches[cur.Name]
+		if hasTelemetryEnabled {
+			foundTelemetrySwitchAfter = true
+		}
 		for _, neigh := range cur.Neighbors() {
 			if !visited[neigh.Ordinal] {
 				neighHadTelemetryOnRoute := foundTelemetrySwitchBefore || hasTelemetryEnabled
-				if neighLeadsToTarget, descendands, foundTelemetrySwitchAfter := dfs(neigh, neighHadTelemetryOnRoute); neighLeadsToTarget {
+				if neighLeadsToTarget, numPortsFromNeigh, foundTelemetryAfter := dfs(neigh, cur, neighHadTelemetryOnRoute); neighLeadsToTarget {
+					foundTelemetrySwitchAfter = foundTelemetrySwitchAfter || foundTelemetryAfter
 					leadsToTarget = true
-					numPortsInDescendats += descendands
+					numPortsInDescendats += numPortsFromNeigh
 					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetrySwitchAfter
 					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
+						numPortsInDescendats++
+					}
+					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(prev.Name) && areOtherSwitchesOnRoute {
 						numPortsInDescendats++
 					}
 				}
@@ -234,7 +245,7 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 		return 0
 	}
 	visited[nodeVertex.Ordinal] = true
-	_, newTelemetryPortsCoveredBySchedulingOnNode, _ := dfs(nodeVertex.Parent, false)
+	_, newTelemetryPortsCoveredBySchedulingOnNode, _ := dfs(nodeVertex.Parent, nodeVertex, false)
 	return newTelemetryPortsCoveredBySchedulingOnNode
 }
 
