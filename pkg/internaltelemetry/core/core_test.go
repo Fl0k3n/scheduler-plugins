@@ -132,47 +132,36 @@ func TestDeploymentManager(t *testing.T) {
 }
 
 func TestScoringEngine(t *testing.T) {
-	t.Run("scheduler's network representation correctly tracks utilized telemetry ports", func(t *testing.T) {
-		depl1Pod := st.MakePod().Name("p1").UID("p1").Namespace("ns1").Labels(map[string]string{
+	depl1 := "depl1"
+	depl2 := "depl2"
+	makePod := func(name string, deplName string) *v1.Pod { 
+		return st.MakePod().Name(name).UID("p1").Namespace("ns1").Labels(map[string]string{
 			INTERNAL_TELEMETRY_POD_INTDEPL_NAME_LABEL: "intdepl",
-			INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL: "depl1",
+			INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL: deplName,
 		}).Obj()
-		depl1 := deploymentInfo{name: "depl1", replicas: -1, podLabel: "foo1"}
-		depl2 := deploymentInfo{name: "depl2", replicas: -1, podLabel: "foo2"}
-		intDeplTemplate := makeTestIintDepl("intdepl", "ns1", []deploymentInfo{depl1, depl2})
-		intDepl := func(first int32, second int32) *intv1alpha.InternalInNetworkTelemetryDeployment {
-			res := intDeplTemplate.DeepCopy()
-			res.Spec.DeploymentTemplates[0].Template.Replicas = &first
-			res.Spec.DeploymentTemplates[1].Template.Replicas = &second
-			return res
+	}
+	intDepl := func(first int32, second int32) *intv1alpha.InternalInNetworkTelemetryDeployment {
+		depl1Info := deploymentInfo{name: depl1, replicas: -1, podLabel: "foo1"}
+		depl2Info := deploymentInfo{name: depl2, replicas: -1, podLabel: "foo2"}
+		intDeplTemplate := makeTestIintDepl("intdepl", "ns1", []deploymentInfo{depl1Info, depl2Info})
+		res := intDeplTemplate.DeepCopy()
+		res.Spec.DeploymentTemplates[0].Template.Replicas = &first
+		res.Spec.DeploymentTemplates[1].Template.Replicas = &second
+		return res
+	}
+	allV4IncSwitches := func() []string {
+		return []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"}
+	}
+	schedule := func (what string, where ...string) []ScheduledNode {
+		res := []ScheduledNode{}
+		for _, node := range where {
+			res = append(res, ScheduledNode{node, []string{what}})
 		}
-		allV4IncSwitches := func() []string {
-			return []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"}
-		}
-		schedule := func (what string, where ...string) []ScheduledNode {
-			res := []ScheduledNode{}
-			for _, node := range where {
-				res = append(res, ScheduledNode{node, []string{what}})
-			}
-			return res
-		}
-		merge := func (sn1 []ScheduledNode, sn2 []ScheduledNode) []ScheduledNode {
-			res := []ScheduledNode{}
-			joined := map[string][]string{}
-			for _, sn := range append(sn1, sn2...) {
-				if depls, ok := joined[sn.Name]; ok {
-					joined[sn.Name] = append(depls, sn.ScheduledDeployments...)
-				} else {
-					joined[sn.Name] = sn.ScheduledDeployments
-				}
-			}
-			for k, v := range joined {
-				res = append(res, ScheduledNode{k, v})
-			}
-			return res
-		}
-		
+		return res
+	}
+	merge := mergeScheduledNodes
 
+	t.Run("scheduler's network representation correctly tracks utilized telemetry ports", func(t *testing.T) {
 		tests := []struct {
 			name                string
 			topo 				*shimv1alpha.Topology
@@ -186,7 +175,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "no ports are used when nothing was scheduled yet",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: allV4IncSwitches(),
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
 				scheduledNodes: []ScheduledNode{},
 				expectedUsedPorts: []switchPort{},
@@ -195,7 +184,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "no ports are used when pods of only 1 deployment were scheduled",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: allV4IncSwitches(),
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
 				scheduledNodes: schedule("depl2", "w1", "w4"),
 			},
@@ -203,7 +192,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "all ports on path between between 2 pods of different deployments are used",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: allV4IncSwitches(),
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
 				scheduledNodes: merge(schedule("depl1", "w1"), schedule("depl2", "w4")),
 				expectedUsedPorts: []switchPort{
@@ -219,7 +208,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "many-to-many communication paths are used",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: allV4IncSwitches(),
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(3, 2),
 				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4", "w5")),
 				expectedUsedPorts: []switchPort{
@@ -241,7 +230,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "only telemetry-enabled switches have used ports",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: []string{"r1", "r3", "r6"},
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(3, 2),
 				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4")),
 				expectedUsedPorts: []switchPort{
@@ -257,7 +246,7 @@ func TestScoringEngine(t *testing.T) {
 				name: "1 telemetry switch on route is not enough to setup telemetry",
 				topo: testTopology("v4-tree"),
 				telemetrySwitches: []string{"r5"},
-				pod: depl1Pod,
+				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
 				scheduledNodes: merge(schedule("depl1", "w1"), schedule("depl2", "w2")),
 				expectedUsedPorts: []switchPort{},
@@ -308,23 +297,114 @@ func TestScoringEngine(t *testing.T) {
 			})
 		}
 	})
-
 	t.Run("sched correctly scores nodes", func(t *testing.T) {
 		tests := []struct {
 			name                string
 			topo 				*shimv1alpha.Topology
-			telemetrySwitches   []*shimv1alpha.IncSwitch
+			telemetrySwitches   []string
 			pod 			    *v1.Pod
+			podsDeploymentName	string
 			intdepl 		    *intv1alpha.InternalInNetworkTelemetryDeployment
 			queuedPods 			QueuedPods
 			scheduledNodes      []ScheduledNode
+			nodesToScore 		[]string
+			expectedScores      []int
 		}{
 			{
+				name: "for 2 pods score for nodes on on longest unused path is highest",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(1, 1),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 1}},
+				scheduledNodes: []ScheduledNode{},
+				nodesToScore: []string{"w1", "w2", "w3", "w4", "w5"},
+				expectedScores: []int{6, 6, 4, 6, 4},
+			},
+			{
+				name: "for second pod score for nodes on longest unused path is highest",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(1, 1),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 0}},
+				scheduledNodes: schedule(depl2, "w4"),
+				nodesToScore: []string{"w1", "w2", "w3", "w4", "w5"},
+				expectedScores: []int{6, 6, 4, 0, 4},
+			},
+			{
+				name: "score for node where pod of same type is already scheduled is 0",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(2, 2),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 1}},
+				scheduledNodes: merge(schedule(depl1, "w1"), schedule(depl2, "w4")),
+				nodesToScore: []string{"w1"},
+				expectedScores: []int{0},
+			},
+			{
+				name: "scoring accounts for 1:n communication model",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(1, 2),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 0}},
+				scheduledNodes: schedule(depl2, "w3", "w4"),
+				nodesToScore: []string{"w1", "w2", "w3", "w4", "w5"},
+				expectedScores: []int{7, 7, 4, 4, 4},
+			},
+			{
+				name: "scoring accounts for n:m communication model",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(2, 2),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 0}},
+				scheduledNodes: merge(schedule(depl1, "w1"), schedule(depl2, "w3", "w4")),
+				nodesToScore: []string{"w1", "w2", "w3", "w4", "w5"},
+				expectedScores: []int{0, 0, 0, 0, 1},
+			},
+			{
+				name: "score is 0 if there is just 1 telemetry switch on path",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r0", "r2"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(1, 1),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 0, depl2: 0}},
+				scheduledNodes: schedule(depl2, "w4"),
+				nodesToScore: []string{"w1"},
+				expectedScores: []int{0},
 			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-
+				testConfig := TelemetrySchedulingEngineConfig{ImmediateWeight: 1, FutureWeight: 1}
+				sched := NewTelemetrySchedulingEngine(testConfig)
+				objs := []runtime.Object{tt.topo, tt.pod, tt.intdepl}
+				objs = append(objs, makeTestIncSwitchesForTopo(tt.topo, tt.telemetrySwitches)...)
+				client := newFakeClient(t, objs...)
+				topoEngine := NewTopologyEngine(client)
+				ctx := context.Background()
+				net, err := topoEngine.PrepareForScheduling(ctx, tt.pod)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sched.PrepareForScheduling(net, tt.intdepl.Name, tt.scheduledNodes)
+				for i := range tt.nodesToScore {
+					nodeName := tt.nodesToScore[i]
+					score := sched.ComputeNodeSchedulingScore(nodeName, tt.intdepl.Name, tt.pod,
+						tt.podsDeploymentName, tt.scheduledNodes, tt.queuedPods)
+					if score != tt.expectedScores[i] {
+						t.Errorf("Invalid score for node %s, expected %d got %d", nodeName, tt.expectedScores[i], score)
+					}
+				}
 			})
 		}
 	})

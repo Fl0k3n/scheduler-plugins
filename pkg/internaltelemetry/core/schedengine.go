@@ -14,10 +14,10 @@ type TelemetrySchedulingEngineConfig struct {
 }
 
 func DefaultTelemetrySchedulingEngineConfig() TelemetrySchedulingEngineConfig {
-	immediateWeight := 0.75
+	immediateWeight := 0.75 * 100
 	return TelemetrySchedulingEngineConfig{
 		ImmediateWeight: immediateWeight,
-		FutureWeight: 1 - immediateWeight,
+		FutureWeight: 100 - immediateWeight,
 	}
 }
 
@@ -219,9 +219,6 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 			return
 		}
 		_, hasTelemetryEnabled := network.TelemetryEnabledSwitches[cur.Name]
-		if hasTelemetryEnabled {
-			foundTelemetrySwitchAfter = true
-		}
 		for _, neigh := range cur.Neighbors() {
 			if !visited[neigh.Ordinal] {
 				neighHadTelemetryOnRoute := foundTelemetrySwitchBefore || hasTelemetryEnabled
@@ -229,15 +226,20 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 					foundTelemetrySwitchAfter = foundTelemetrySwitchAfter || foundTelemetryAfter
 					leadsToTarget = true
 					numPortsInDescendats += numPortsFromNeigh
-					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetrySwitchAfter
+					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetryAfter
 					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
-						numPortsInDescendats++
-					}
-					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(prev.Name) && areOtherSwitchesOnRoute {
 						numPortsInDescendats++
 					}
 				}
 			}
+		}
+		if hasTelemetryEnabled && leadsToTarget && 
+				(foundTelemetrySwitchBefore || foundTelemetrySwitchAfter) &&
+				cur.Meta.IsPortUnallocated(prev.Name) {
+			numPortsInDescendats++
+		}
+		if hasTelemetryEnabled {
+			foundTelemetrySwitchAfter = true
 		}
 		return
 	}
