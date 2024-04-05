@@ -131,6 +131,118 @@ func TestDeploymentManager(t *testing.T) {
 	}
 }
 
+func TestSchedulingTracker(t *testing.T) {
+	depl1 := "depl1"
+	depl2 := "depl2"
+	makePod := func(name string, deplName string, nodeName string) *v1.Pod { 
+		return st.MakePod().Name(name).UID("p1").Namespace("ns1").Labels(map[string]string{
+			INTERNAL_TELEMETRY_POD_INTDEPL_NAME_LABEL: "intdepl",
+			INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL: deplName,
+		}).Node(nodeName).Obj()
+	}
+	withoutIntDeplLabel := func (p *v1.Pod) *v1.Pod {
+		delete(p.Labels, INTERNAL_TELEMETRY_POD_INTDEPL_NAME_LABEL)
+		return p
+	}
+	intDepl := func(first int32, second int32) *intv1alpha.InternalInNetworkTelemetryDeployment {
+		depl1Info := deploymentInfo{name: depl1, replicas: -1, podLabel: "foo1"}
+		depl2Info := deploymentInfo{name: depl2, replicas: -1, podLabel: "foo2"}
+		intDeplTemplate := makeTestIintDepl("intdepl", "ns1", []deploymentInfo{depl1Info, depl2Info})
+		res := intDeplTemplate.DeepCopy()
+		res.Spec.DeploymentTemplates[0].Template.Replicas = &first
+		res.Spec.DeploymentTemplates[1].Template.Replicas = &second
+		return res
+	}
+	queuedPods := func (depl1Count int, depl2Count int) QueuedPods {
+		return QueuedPods{
+			PerDeploymentCounts: map[string]int{
+				depl1: depl1Count,
+				depl2: depl2Count,
+			},
+		}
+	}
+	merge := mergeScheduledNodes
+	t.Run("scheduled nodes and queued pods are correctly computed", func(t *testing.T) {
+		tests := []struct{
+			name 					string
+			intdepl 				*intv1alpha.InternalInNetworkTelemetryDeployment
+			podsDeploymentName 		string
+			scheduledPods           []*v1.Pod
+			expectedScheduledNodes  []ScheduledNode
+			expectedQueuedPods 		QueuedPods
+		}{
+			{
+				name: "when no pods were schedule scheduled nodes are empty and queued pods have all remaining replicas",
+				intdepl: intDepl(2, 2),
+				podsDeploymentName: depl1,
+				scheduledPods: []*v1.Pod{},
+				expectedScheduledNodes: []ScheduledNode{},
+				expectedQueuedPods: queuedPods(1, 2),
+			},
+			{
+				name: "scheduled pods of given intdepl contribute to tracked state",
+				intdepl: intDepl(3, 3),
+				podsDeploymentName: depl1,
+				scheduledPods: []*v1.Pod{makePod("p1", depl1, "n1"), makePod("p2", depl2, "n1"), makePod("p3", depl2, "n2")},
+				expectedScheduledNodes: merge(schedule(depl1, "n1"), schedule(depl2, "n1", "n2")),
+				expectedQueuedPods: queuedPods(1, 1),
+			},
+			{
+				name: "only pods of given intdepl contribute to tracked state",
+				intdepl: intDepl(2, 2),
+				podsDeploymentName: depl1,
+				scheduledPods: []*v1.Pod{makePod("p1", depl1, "n1"), withoutIntDeplLabel(makePod("p2", "x", "n1"))},
+				expectedScheduledNodes: schedule(depl1, "n1"),
+				expectedQueuedPods: queuedPods(0, 2),
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				objs := []runtime.Object{tt.intdepl}
+				for _, pod := range tt.scheduledPods {
+					objs = append(objs, pod)
+				}
+				client := newFakeClient(t, objs...)
+				tracker := NewTelemetrySchedulingTracker(client)
+				tracker.PrepareForPodScheduling(tt.intdepl)
+				ctx := context.Background()
+				scheduledNodes, queuedPods, err := tracker.GetSchedulingState(ctx, tt.intdepl, tt.podsDeploymentName)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if actual, expected := len(scheduledNodes), len(tt.expectedScheduledNodes); actual != expected {
+					t.Errorf("Invalid scheduledNodes length, expected %d, got %d", expected, actual)
+				} else {
+					for _, esn := range tt.expectedScheduledNodes {
+						if idx := slices.IndexFunc(scheduledNodes, func(sn ScheduledNode) bool {
+							return esn.Name == sn.Name
+						}); idx == -1 {
+							t.Errorf("Scheduled node %s not found", esn.Name)
+						} else if !esn.Equals(&scheduledNodes[idx]) {
+							t.Errorf("Invalid deployments on node %s, expected %v got %v",
+								 esn.Name, esn.ScheduledDeployments, scheduledNodes[idx].ScheduledDeployments)
+						}
+					}
+				}
+				if actual, expected := len(queuedPods.PerDeploymentCounts),
+									   len(tt.expectedQueuedPods.PerDeploymentCounts); actual != expected {
+					t.Errorf("Invalid queuedPods length, expected %d, got %d", expected, actual)
+				} else {
+					for k, expectedCount := range tt.expectedQueuedPods.PerDeploymentCounts {
+						if actualCount, ok := queuedPods.PerDeploymentCounts[k]; ok {
+							if expectedCount != actualCount {
+								t.Errorf("invalid deployment count for %s, expected %d, got %d", k, expectedCount, actualCount)
+							}
+						} else {
+							t.Errorf("deployment's count %s not found in %v", k, queuedPods)
+						}
+					}
+				}
+			})
+		}
+	})
+}
+
 func TestScoringEngine(t *testing.T) {
 	depl1 := "depl1"
 	depl2 := "depl2"
@@ -151,13 +263,6 @@ func TestScoringEngine(t *testing.T) {
 	}
 	allV4IncSwitches := func() []string {
 		return []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"}
-	}
-	schedule := func (what string, where ...string) []ScheduledNode {
-		res := []ScheduledNode{}
-		for _, node := range where {
-			res = append(res, ScheduledNode{node, []string{what}})
-		}
-		return res
 	}
 	merge := mergeScheduledNodes
 
@@ -567,6 +672,14 @@ func withExtraEdges(topo *shimv1alpha.Topology, edges ...edge) *shimv1alpha.Topo
 		}
 	}
 	return t
+}
+
+func schedule (what string, where ...string) []ScheduledNode {
+	res := []ScheduledNode{}
+	for _, node := range where {
+		res = append(res, ScheduledNode{node, []string{what}})
+	}
+	return res
 }
 
 func makeTestIncSwitchesForTopo(topo *shimv1alpha.Topology, telemetrySwitches []string) []runtime.Object {

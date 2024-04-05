@@ -26,6 +26,19 @@ func (s *ScheduledNode) MarkScheduled(deplName string) {
 	s.ScheduledDeployments = append(s.ScheduledDeployments, deplName)
 }
 
+// order of scheduled deployments is ignored
+func (s *ScheduledNode) Equals(other *ScheduledNode) bool {
+	if s.Name != other.Name || len(s.ScheduledDeployments) != len(other.ScheduledDeployments) {
+		return false
+	}
+	for _, sd := range s.ScheduledDeployments {
+		if slices.Index(other.ScheduledDeployments, sd) == -1 {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *ScheduledNode) HasScheduled(deplName string) bool {
 	return slices.Contains(s.ScheduledDeployments, deplName)
 }
@@ -33,6 +46,12 @@ func (s *ScheduledNode) HasScheduled(deplName string) bool {
 // must exclude pod that is currently being scheduled
 type QueuedPods struct {
 	PerDeploymentCounts map[string]int // deploymentName -> number of remaining pods
+}
+
+func newQueuedPods() QueuedPods {
+	return QueuedPods{
+		PerDeploymentCounts: map[string]int{},
+	}
 }
 
 func (q *QueuedPods) AllQueued() bool {

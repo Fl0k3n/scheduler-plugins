@@ -2,8 +2,6 @@ package internaltelemetry
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,9 +14,31 @@ import (
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
 
-const Name = "InternalTelemetry"
-const INTERNAL_TELEMETRY_POD_DEPLOYMENT_OWNER_LABEL = "inc.kntp.com/owned-by-iintdepl"
-const INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL = "inc.kntp.com/part-of-deployment"
+const (
+	Name = "InternalTelemetry"
+	INTERNAL_TELEMETRY_POD_DEPLOYMENT_OWNER_LABEL = "inc.kntp.com/owned-by-iintdepl"
+	INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL = "inc.kntp.com/part-of-deployment"
+	TELEMETRY_CYCLE_STATE_KEY = Name
+)
+
+type TelemetryCycleState struct {
+	Network *core.Network
+	ScheduledNodes []core.ScheduledNode
+	QueuedPods core.QueuedPods
+	Intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
+	PodsDeploymentName string
+}
+
+// cycle state is treated as immutable and hence full shallow copy suffices
+func (t *TelemetryCycleState) Clone() framework.StateData {
+	return &TelemetryCycleState{
+		Network: t.Network,
+		ScheduledNodes: t.ScheduledNodes,
+		QueuedPods: t.QueuedPods,
+		Intdepl: t.Intdepl,
+		PodsDeploymentName: t.PodsDeploymentName,
+	}
+}
 
 type InternalTelemetry struct {
 	client.Client
@@ -31,6 +51,8 @@ type InternalTelemetry struct {
 
 var _ framework.PreScorePlugin = &InternalTelemetry{}
 var _ framework.ScorePlugin = &InternalTelemetry{}
+var _ framework.ReservePlugin = &InternalTelemetry{}
+var _ framework.PostBindPlugin = &InternalTelemetry{}
 
 func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	klog.Info("initializing internal telemetry plugin: v0.0.1")
@@ -59,12 +81,11 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	}, nil
 }
 
-
-func (ts *InternalTelemetry) Name() string {
+func (t *InternalTelemetry) Name() string {
 	return Name
 }
 
-func (ts *InternalTelemetry) PreScore(
+func (t *InternalTelemetry) PreScore(
 	ctx context.Context,
 	state *framework.CycleState,
 	pod *v1.Pod,
@@ -74,62 +95,117 @@ func (ts *InternalTelemetry) PreScore(
 	var network *core.Network
 	var intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
 	var podsDeplName string
-	if network, err = ts.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
-		goto fail
-	}
-	if intdepl, podsDeplName, err = ts.deplMgr.PrepareForPodScheduling(ctx, pod); err != nil {
-		goto fail
-	}
-	ts.tracker.PrepareForPodScheduling(intdepl)
+	var scheduledNodes []core.ScheduledNode
+	var queuedPods core.QueuedPods
 
-	_ = podsDeplName // TOOD
-	ts.schedEngine.PrepareForPodScheduling(network, intdepl, []core.ScheduledNode{}) // TODO we need tracker of scheduled nodes
+	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
+		goto fail
+	}
+	if intdepl, podsDeplName, err = t.deplMgr.PrepareForPodScheduling(ctx, pod); err != nil {
+		goto fail
+	}
+	t.tracker.PrepareForPodScheduling(intdepl)
+	if scheduledNodes, queuedPods, err = t.tracker.GetSchedulingState(ctx, intdepl, podsDeplName); err != nil {
+		goto fail
+	}
+	t.schedEngine.PrepareForPodScheduling(network, intdepl, scheduledNodes)
+	state.Write(TELEMETRY_CYCLE_STATE_KEY, &TelemetryCycleState{
+		Network: network,
+		ScheduledNodes: scheduledNodes,
+		QueuedPods: queuedPods,
+		Intdepl: intdepl,
+		PodsDeploymentName: podsDeplName,
+	})
 	return nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)
 	return framework.AsStatus(err)
 }
 
-func (ts *InternalTelemetry) PreFilterExtensions() framework.PreFilterExtensions {
-	return nil
-}
-
-func (ts *InternalTelemetry) Score(
+func (t *InternalTelemetry) Score(
 	ctx context.Context,
 	state *framework.CycleState,
 	p *v1.Pod,
 	nodeName string,
 ) (int64, *framework.Status) {
 	klog.Infof("Scoring node %s for pod %s", nodeName, p.Name)
-	fmt.Println("Scoring pod")
-	nodeList := &v1.NodeList{}
-	if err := ts.Client.List(ctx, nodeList); err != nil {
-		fmt.Printf("Failed to fetch nodes: %e\n", err)	
+	ts, err := state.Read(TELEMETRY_CYCLE_STATE_KEY)
+	if err != nil {
+		return 0, framework.AsStatus(err)
 	}
-	nodeNames := []string{}
-	for _, node := range nodeList.Items {
-		nodeNames = append(nodeNames, node.Name)
-	}
-	fmt.Printf("Nodes: %s\n", strings.Join(nodeNames, ", "))
-	return 50, nil
+	telemetryState := ts.(*TelemetryCycleState)
+	score := t.schedEngine.ComputeNodeSchedulingScore(
+		telemetryState.Network,
+		nodeName,
+		telemetryState.Intdepl,
+		p,
+		telemetryState.PodsDeploymentName,
+		telemetryState.ScheduledNodes,
+		telemetryState.QueuedPods,
+	)
+	klog.Info("Node %s score for pod %s = %d", nodeName, p.Name, score)
+	return int64(score), nil
 }
 
-func (ts *InternalTelemetry) NormalizeScore(
+func (t *InternalTelemetry) NormalizeScore(
 	ctx context.Context,
 	state *framework.CycleState,
 	p *v1.Pod,
 	scores framework.NodeScoreList,
 ) *framework.Status {
 	maxScore := scores[0].Score
-	for i := range scores {
-		if scores[i].Score > maxScore {
-			maxScore = scores[0].Score
+	minScore := scores[0].Score
+	for _, nodeScore := range scores {
+		if nodeScore.Score > maxScore {
+			maxScore = nodeScore.Score
+		}
+		if nodeScore.Score < minScore {
+			minScore = nodeScore.Score
 		}
 	}
-	klog.Infof("max score: %d")
+	klog.Infof("min score: %d, max score: %d", minScore, maxScore)
+	if minScore == maxScore {
+		for node := range scores {
+			scores[node].Score = framework.MinNodeScore
+		}
+	} else {
+		for node, score := range scores {
+			newScore := float64(score.Score - minScore) / float64(maxScore - minScore) // [0, 1]
+			newScore = newScore * float64(framework.MaxNodeScore - framework.MinNodeScore) // [0, M - m]
+			newScore += float64(framework.MinNodeScore) // [m, M]
+			scores[node].Score = int64(newScore)
+		}
+	}
 	return nil
 }
 
-func (ts *InternalTelemetry) ScoreExtensions() framework.ScoreExtensions {
-	return ts
+func (t *InternalTelemetry) ScoreExtensions() framework.ScoreExtensions {
+	return t
+}
+
+func (t *InternalTelemetry) Reserve(
+	ctx context.Context,
+	state *framework.CycleState,
+	p *v1.Pod,
+	nodeName string,
+) *framework.Status {
+	return nil
+}
+
+func (t *InternalTelemetry) Unreserve(
+	ctx context.Context,
+	state *framework.CycleState,
+	p *v1.Pod,
+	nodeName string,
+) {
+
+}
+
+func (t *InternalTelemetry) PostBind(
+	ctx context.Context,
+	state *framework.CycleState,
+	p *v1.Pod,
+	nodeName string,
+) {
+
 }

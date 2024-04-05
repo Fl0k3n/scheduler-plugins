@@ -48,7 +48,7 @@ func (t *TelemetrySchedulingTracker) GetSchedulingState(
 	scheduledNodes := mergeScheduledNodes(scheduledAndBound, scheduledAndReserved.Reservations)
 	counters := scheduledCounters.CombinedWith(scheduledAndReserved.ScheduledCounters)
 
-	queuedPods := QueuedPods{}
+	queuedPods := newQueuedPods()
 	for _, depl := range intdepl.Spec.DeploymentTemplates {
 		alreadyScheduled := counters.Get(depl.Name)
 		if currentPodsDeploymentName == depl.Name {
