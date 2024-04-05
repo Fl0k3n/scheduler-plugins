@@ -1,10 +1,13 @@
 package core
 
 import (
-	"maps"
 	"slices"
+	"sync"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
 
@@ -22,46 +25,51 @@ func DefaultTelemetrySchedulingEngineConfig() TelemetrySchedulingEngineConfig {
 }
 
 type TelemetrySchedulingEngine struct {
-	deploymentNetworkCache map[string]*Network[TelemetryPortsMeta] // iintdeplName -> meta
+	// TODO this should be a thread-safe bounded LRU cache
+	deploymentSchedulingCache sync.Map // objectKey(intdepl) -> *DeploymentSchedulingState
 	config TelemetrySchedulingEngineConfig
 }
 
 func NewTelemetrySchedulingEngine(config TelemetrySchedulingEngineConfig) *TelemetrySchedulingEngine {
 	return &TelemetrySchedulingEngine{
-		deploymentNetworkCache: map[string]*Network[TelemetryPortsMeta]{},
+		deploymentSchedulingCache: sync.Map{},
 		config: config,
 	}
 }
 
-func (t *TelemetrySchedulingEngine) PrepareForScheduling(
-	network *Network[Nothing],
-	intdeplName string,
-	previouslyScheduleNodes []ScheduledNode,
+func (t *TelemetrySchedulingEngine) PrepareForPodScheduling(
+	network *Network,
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+	previouslyScheduledNodes []ScheduledNode,
 ) {
-	if _, ok := t.deploymentNetworkCache[intdeplName]; ok {
+	// TODO cached should used for performance reasons, but it needs to be carefully managed (e.g. watch terminated pods etc)
+	// for now let's recompute it for each pod
+	// if _, ok := t.deploymentSchedulingCache.Load(client.ObjectKeyFromObject(intdepl)); ok {
 		// TODO check if cached version matches current once network is mutable
-		return
-	}
-	deploymentsNetworkView := mapDeepCopy(network, func(v *Vertex[Nothing]) TelemetryPortsMeta {
+		// return
+	// }
+	state := newDeploymentSchedulingState(network)
+	network.IterVertices(func(v *Vertex) {
 		if _, ok := network.TelemetryEnabledSwitches[v.Name]; ok {
 			neighbors := v.Neighbors()
 			res := make(map[string]struct{}, len(neighbors))
 			for _, neighbor := range neighbors {
 				res[neighbor.Name] = struct{}{}
 			}
-			return TelemetryPortsMeta{AvailableTelemetryPorts: res}
+			state.SetPortMetaOf(v, &TelemetryPortsMeta{AvailableTelemetryPorts: res})
+		} else {
+			state.SetPortMetaOf(v, &TelemetryPortsMeta{AvailableTelemetryPorts: map[string]struct{}{}})
 		}
-		return TelemetryPortsMeta{AvailableTelemetryPorts: map[string]struct{}{}}
 	})
-	t.deploymentNetworkCache[intdeplName] = deploymentsNetworkView
-	if len(previouslyScheduleNodes) > 0 {
+	t.deploymentSchedulingCache.Store(client.ObjectKeyFromObject(intdepl), state)
+	if len(previouslyScheduledNodes) > 0 {
 		// this can happen if sched crashed or in tests where we don't have cached 
 		// network state but some pods of this deployment have already been scheduled
 		virtualScheduledNodes := []ScheduledNode{}
-		for _, sn := range previouslyScheduleNodes {
+		for _, sn := range previouslyScheduledNodes {
 			for _, depl := range sn.ScheduledDeployments {
-				v := deploymentsNetworkView.Vertices[sn.Name]
-				virtualScheduledNodes = t.markScheduled(deploymentsNetworkView, virtualScheduledNodes, depl, v)
+				v := network.Vertices[sn.Name]
+				virtualScheduledNodes = t.markScheduled(network, state, virtualScheduledNodes, depl, v)
 			}
 		}
 	}
@@ -78,20 +86,36 @@ func (t *TelemetrySchedulingEngine) PrepareForScheduling(
 // 	return res
 // }
 
-func (t *TelemetrySchedulingEngine) getCachedDeploymentsNetworkView(intdeplName string) *Network[TelemetryPortsMeta] {
-	return t.deploymentNetworkCache[intdeplName]	
+func (t *TelemetrySchedulingEngine) GetCachedDeploymentsNetworkView(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+) (*DeploymentSchedulingState, bool) {
+	state, ok := t.deploymentSchedulingCache.Load(client.ObjectKeyFromObject(intdepl))
+	if !ok {
+		return nil, false
+	}
+	return state.(*DeploymentSchedulingState), true
+}
+
+func (t *TelemetrySchedulingEngine) MustGetCachedDeploymentsNetworkView(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+) *DeploymentSchedulingState {
+	if state, ok := t.GetCachedDeploymentsNetworkView(intdepl); ok {
+		return state
+	}
+	panic("assertion failed")
 }
 
 func (t *TelemetrySchedulingEngine) getGreedyBestNodeToSchedule(
-	network *Network[TelemetryPortsMeta],
+	network *Network,
+	schedulingState *DeploymentSchedulingState,
 	scheduledNodes []ScheduledNode,
 	deplName string,
-) (*Vertex[TelemetryPortsMeta], int) {
+) (*Vertex, int) {
 	bestGain := -1
-	var bestNode *Vertex[TelemetryPortsMeta] = nil 
+	var bestNode *Vertex = nil 
 	// TODO optimize this
-	network.IterVerticesOfType(shimv1alpha.NODE, func(v *Vertex[TelemetryPortsMeta]) {
-		gain := t.computeImmediatePortsGainedByScheduling(network, deplName, v, scheduledNodes)
+	network.IterVerticesOfType(shimv1alpha.NODE, func(v *Vertex) {
+		gain := t.computeImmediatePortsGainedByScheduling(network, schedulingState, deplName, v, scheduledNodes)
 		if gain > bestGain {
 			bestNode = v
 			bestGain = gain
@@ -101,18 +125,19 @@ func (t *TelemetrySchedulingEngine) getGreedyBestNodeToSchedule(
 }
 
 func (t *TelemetrySchedulingEngine) markScheduled(
-	network *Network[TelemetryPortsMeta],
+	network *Network,
+	schedulingState *DeploymentSchedulingState,
 	scheduledNodes []ScheduledNode,
 	deplName string,
-	nodeVertex *Vertex[TelemetryPortsMeta],
+	nodeVertex *Vertex,
 ) []ScheduledNode {
 	visited := make([]bool, len(network.Vertices))
 	for i := 0; i < len(visited); i++ {
 		visited[i] = false
 	}
 	targets := t.getNodesWithPodsOfOtherDeployment(deplName, scheduledNodes)
-	var dfs func(*Vertex[TelemetryPortsMeta], *Vertex[TelemetryPortsMeta], bool) (bool, bool)
-	dfs = func(cur *Vertex[TelemetryPortsMeta], prev *Vertex[TelemetryPortsMeta], foundTelemetrySwitchBefore bool) (leadsToTarget bool, foundTelemetrySwitchAfter bool) {
+	var dfs func(*Vertex, *Vertex, bool) (bool, bool)
+	dfs = func(cur *Vertex, prev *Vertex, foundTelemetrySwitchBefore bool) (leadsToTarget bool, foundTelemetrySwitchAfter bool) {
 		visited[cur.Ordinal] = true
 		foundTelemetrySwitchAfter = false
 		if cur.DeviceType == shimv1alpha.NODE {
@@ -127,11 +152,12 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 				if neighLeadsToTarget {
 					leadsToTarget = true
 					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetryAfter
-					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
-						cur.Meta.AllocatePort(neigh.Name)
+					curMeta := schedulingState.PortMetaOf(cur)
+					if hasTelemetryEnabled && curMeta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
+						curMeta.AllocatePort(neigh.Name)
 					}
-					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(prev.Name) && areOtherSwitchesOnRoute {
-						cur.Meta.AllocatePort(prev.Name)
+					if hasTelemetryEnabled && curMeta.IsPortUnallocated(prev.Name) && areOtherSwitchesOnRoute {
+						curMeta.AllocatePort(prev.Name)
 					}
 				}
 				foundTelemetrySwitchAfter = foundTelemetrySwitchAfter || foundTelemetryAfter
@@ -165,7 +191,8 @@ func (t *TelemetrySchedulingEngine) markScheduled(
 }
 
 func (t *TelemetrySchedulingEngine) approximateFuturePortsGainedByScheduling(
-	network *Network[TelemetryPortsMeta],
+	network *Network,
+	schedulingState *DeploymentSchedulingState,
 	queuedPods QueuedPods,
 	scheduledNodes []ScheduledNode,
 	previouslyScheduledDeplName string,
@@ -184,18 +211,19 @@ func (t *TelemetrySchedulingEngine) approximateFuturePortsGainedByScheduling(
 	totalGain := 0
 	for _, otherDeplName := range otherDeplNames {
 		for i := 0; i < queuedPods.PerDeploymentCounts[otherDeplName]; i++ {
-			node, gain := t.getGreedyBestNodeToSchedule(network, scheduledNodes, otherDeplName)
+			node, gain := t.getGreedyBestNodeToSchedule(network, schedulingState, scheduledNodes, otherDeplName)
 			totalGain += gain
-			scheduledNodes = t.markScheduled(network, scheduledNodes, otherDeplName, node)
+			scheduledNodes = t.markScheduled(network, schedulingState, scheduledNodes, otherDeplName, node)
 		}
 	}
 	return totalGain
 }
 
 func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
-	network *Network[TelemetryPortsMeta],
+	network *Network,
+	schedulingState *DeploymentSchedulingState,
 	podsDeploymentName string,
-	nodeVertex *Vertex[TelemetryPortsMeta],
+	nodeVertex *Vertex,
 	previouslyScheduledNodes []ScheduledNode,
 ) int {
 	visited := make([]bool, len(network.Vertices))
@@ -204,10 +232,10 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 	}
 	targetNodes := t.getNodesWithPodsOfOtherDeployment(podsDeploymentName, previouslyScheduledNodes)
 	
-	var dfs func(*Vertex[TelemetryPortsMeta], *Vertex[TelemetryPortsMeta], bool) (bool, int, bool)
+	var dfs func(*Vertex, *Vertex, bool) (bool, int, bool)
 	dfs = func(
-		cur *Vertex[TelemetryPortsMeta],
-		prev *Vertex[TelemetryPortsMeta],
+		cur *Vertex,
+		prev *Vertex,
 		foundTelemetrySwitchBefore bool,
 	) (leadsToTarget bool, numPortsInDescendats int, foundTelemetrySwitchAfter bool) {
 		visited[cur.Ordinal] = true
@@ -219,6 +247,7 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 			return
 		}
 		_, hasTelemetryEnabled := network.TelemetryEnabledSwitches[cur.Name]
+		curMeta := schedulingState.PortMetaOf(cur)
 		for _, neigh := range cur.Neighbors() {
 			if !visited[neigh.Ordinal] {
 				neighHadTelemetryOnRoute := foundTelemetrySwitchBefore || hasTelemetryEnabled
@@ -227,7 +256,7 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 					leadsToTarget = true
 					numPortsInDescendats += numPortsFromNeigh
 					areOtherSwitchesOnRoute := foundTelemetrySwitchBefore || foundTelemetryAfter
-					if hasTelemetryEnabled && cur.Meta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
+					if hasTelemetryEnabled && curMeta.IsPortUnallocated(neigh.Name) && areOtherSwitchesOnRoute {
 						numPortsInDescendats++
 					}
 				}
@@ -235,7 +264,7 @@ func (t *TelemetrySchedulingEngine) computeImmediatePortsGainedByScheduling(
 		}
 		if hasTelemetryEnabled && leadsToTarget && 
 				(foundTelemetrySwitchBefore || foundTelemetrySwitchAfter) &&
-				cur.Meta.IsPortUnallocated(prev.Name) {
+				curMeta.IsPortUnallocated(prev.Name) {
 			numPortsInDescendats++
 		}
 		if hasTelemetryEnabled {
@@ -275,9 +304,21 @@ func (t *TelemetrySchedulingEngine) isDeploymentMemberAlreadyScheduledOnNode(nod
 	return false
 }
 
+func (t *TelemetrySchedulingEngine) mustLoadStateCopy(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+) *DeploymentSchedulingState {
+	s, ok := t.deploymentSchedulingCache.Load(client.ObjectKeyFromObject(intdepl))
+	if !ok {
+		klog.Errorf("failed to load scheduled state for %v", client.ObjectKeyFromObject(intdepl))
+		panic("assertion failed")
+	}
+	return s.(*DeploymentSchedulingState).DeepCopy()
+}
+
 func (t *TelemetrySchedulingEngine) ComputeNodeSchedulingScore(
+	network *Network,
 	nodeName string,
-	intdeplName string,
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
 	pod *v1.Pod,
 	podsDeploymentName string,
 	scheduledNodes []ScheduledNode,
@@ -286,20 +327,14 @@ func (t *TelemetrySchedulingEngine) ComputeNodeSchedulingScore(
 	if t.isDeploymentMemberAlreadyScheduledOnNode(nodeName, scheduledNodes, podsDeploymentName) {
 		return 0
 	}
-	network := t.deploymentNetworkCache[intdeplName]
 	nodeVertex := network.Vertices[nodeName]
+	state := t.mustLoadStateCopy(intdepl)
 
-	immediateGain := t.computeImmediatePortsGainedByScheduling(network, podsDeploymentName, nodeVertex, scheduledNodes)
-
-	// TODO COW
-	snapshot := network.TakeMetadataSnapshot(func(tpm TelemetryPortsMeta) TelemetryPortsMeta {
-		return TelemetryPortsMeta{AvailableTelemetryPorts: maps.Clone(tpm.AvailableTelemetryPorts)}
-	})
+	immediateGain := t.computeImmediatePortsGainedByScheduling(network, state, podsDeploymentName, nodeVertex, scheduledNodes)
 	scheduledNodes = deepCopyScheduledNodes(scheduledNodes)
-	defer network.RestoreMetadataFromSnapshot(snapshot)
 
-	scheduledNodes = t.markScheduled(network, scheduledNodes, podsDeploymentName, nodeVertex)
-	futureGain := t.approximateFuturePortsGainedByScheduling(network, queuedPods, scheduledNodes, podsDeploymentName)
+	scheduledNodes = t.markScheduled(network, state, scheduledNodes, podsDeploymentName, nodeVertex)
+	futureGain := t.approximateFuturePortsGainedByScheduling(network, state, queuedPods, scheduledNodes, podsDeploymentName)
 
 	return int(float64(immediateGain) * t.config.ImmediateWeight + float64(futureGain) * t.config.FutureWeight)
 }

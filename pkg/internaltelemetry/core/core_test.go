@@ -78,7 +78,7 @@ func TestTopologyEngine(t *testing.T) {
 
 			topoEngine := NewTopologyEngine(client)
 			ctx := context.Background()
-			_, err := topoEngine.PrepareForScheduling(ctx, tt.pod)
+			_, err := topoEngine.PrepareForPodScheduling(ctx, tt.pod)
 			if tt.wantError && err == nil {
 				t.Errorf("expected error but succeeded")
 			} else if !tt.wantError && err != nil {
@@ -260,12 +260,12 @@ func TestScoringEngine(t *testing.T) {
 				client := newFakeClient(t, objs...)
 				topoEngine := NewTopologyEngine(client)
 				ctx := context.Background()
-				net, err := topoEngine.PrepareForScheduling(ctx, tt.pod)
+				net, err := topoEngine.PrepareForPodScheduling(ctx, tt.pod)
 				if err != nil {
 					t.Fatal(err)
 				}
-				sched.PrepareForScheduling(net, tt.intdepl.Name, tt.scheduledNodes)
-				repr := sched.getCachedDeploymentsNetworkView(tt.intdepl.Name)
+				sched.PrepareForPodScheduling(net, tt.intdepl, tt.scheduledNodes)
+				schedState := sched.MustGetCachedDeploymentsNetworkView(tt.intdepl)
 
 				shouldBeUsed := func(from string, to string) bool {
 					for _, p := range tt.expectedUsedPorts {
@@ -275,15 +275,16 @@ func TestScoringEngine(t *testing.T) {
 					}
 					return false
 				}
-				for _, v := range repr.Vertices {
+				for _, v := range net.Vertices {
 					mustHaveNoTelemetryPorts := slices.Index(tt.telemetrySwitches, v.Name) == -1
+					portMeta := schedState.PortMetaOf(v)
 					if mustHaveNoTelemetryPorts {
-						if len(v.Meta.AvailableTelemetryPorts) > 0 {
-							t.Errorf("Expected %s to have no availabe ports, but got: %v", v.Name, v.Meta.AvailableTelemetryPorts)
+						if len(portMeta.AvailableTelemetryPorts) > 0 {
+							t.Errorf("Expected %s to have no availabe ports, but got: %v", v.Name, portMeta.AvailableTelemetryPorts)
 						}
 					} else {
 						for _, neigh := range v.Neighbors() {
-							is := !v.Meta.IsPortUnallocated(neigh.Name)
+							is := !portMeta.IsPortUnallocated(neigh.Name)
 							if shouldBe := shouldBeUsed(v.Name, neigh.Name); is != shouldBe {
 								if shouldBe {
 									t.Errorf("Expected port from %s to %s to be used but isn't", v.Name, neigh.Name)
@@ -392,14 +393,14 @@ func TestScoringEngine(t *testing.T) {
 				client := newFakeClient(t, objs...)
 				topoEngine := NewTopologyEngine(client)
 				ctx := context.Background()
-				net, err := topoEngine.PrepareForScheduling(ctx, tt.pod)
+				net, err := topoEngine.PrepareForPodScheduling(ctx, tt.pod)
 				if err != nil {
 					t.Fatal(err)
 				}
-				sched.PrepareForScheduling(net, tt.intdepl.Name, tt.scheduledNodes)
+				sched.PrepareForPodScheduling(net, tt.intdepl, tt.scheduledNodes)
 				for i := range tt.nodesToScore {
 					nodeName := tt.nodesToScore[i]
-					score := sched.ComputeNodeSchedulingScore(nodeName, tt.intdepl.Name, tt.pod,
+					score := sched.ComputeNodeSchedulingScore(net, nodeName, tt.intdepl, tt.pod,
 						tt.podsDeploymentName, tt.scheduledNodes, tt.queuedPods)
 					if score != tt.expectedScores[i] {
 						t.Errorf("Invalid score for node %s, expected %d got %d", nodeName, tt.expectedScores[i], score)

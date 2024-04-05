@@ -14,13 +14,11 @@ import (
 
 const TELEMETRY_INTERFACE = "inc.kntp.com/v1alpha1/telemetry"
 
-type Nothing struct{}
-
 type TopologyEngine struct {
 	client client.Client
 	topoReady bool
 	topo *shimv1alpha.Topology 
-	network *Network[Nothing]
+	network *Network
 }
 
 func NewTopologyEngine(client client.Client) *TopologyEngine {
@@ -109,7 +107,7 @@ func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (telemetryEnabledS
 
 // build tree representation of topology graph
 // returns error if topology is not a fully-connected tree
-func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.IncSwitch) (*Network[Nothing], error) {
+func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.IncSwitch) (*Network, error) {
 	// pick any non-k8s device for root if one is available
 	rootName := t.topo.Spec.Graph[0].Name
 	for _, dev := range t.topo.Spec.Graph {
@@ -119,7 +117,7 @@ func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.In
 		}
 	}
 	type devNameWithParent struct {
-		parent *Vertex[Nothing]
+		parent *Vertex
 		childName string
 		childIdx int
 	}
@@ -129,12 +127,12 @@ func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.In
 	visitedSet[rootName] = struct{}{}
 	topoMap := toMapByDeviceName(t.topo)
 	ordinalsMap := toOrdinalsByDeviceName(t.topo)
-	var root *Vertex[Nothing] = nil
+	var root *Vertex = nil
 
 	for queue.Len() > 0 {
 		cur := queue.PopFront()
 		curDev := topoMap[cur.childName]
-		vertex := &Vertex[Nothing]{
+		vertex := &Vertex{
 			Name: curDev.Name,
 			Ordinal: ordinalsMap[curDev.Name],
 			DeviceType: curDev.DeviceType,
@@ -150,7 +148,7 @@ func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.In
 		}
 		if numChildren > 0 {
 			childCounter := 0
-			vertex.Children = make([]*Vertex[Nothing], numChildren)
+			vertex.Children = make([]*Vertex, numChildren)
 			for _, link := range curDev.Links {
 				if cur.parent == nil || link.PeerName != cur.parent.Name {
 					if _, ok := visitedSet[link.PeerName]; ok {
@@ -171,8 +169,8 @@ func (t *TopologyEngine) buildNetworkRepr(incswitches map[string]*shimv1alpha.In
 		return nil, fmt.Errorf("topology is not fully connected")
 	}
 	res := newNetwork(root, incswitches)
-	res.Vertices = map[string]*Vertex[Nothing]{}
-	res.IterVertices(func(v *Vertex[Nothing]) {res.Vertices[v.Name] = v})
+	res.Vertices = map[string]*Vertex{}
+	res.IterVertices(func(v *Vertex) {res.Vertices[v.Name] = v})
 	return res, nil
 }
 
@@ -199,7 +197,7 @@ func (t *TopologyEngine) WatchTopologyChanges(ctx context.Context) error {
 	return nil
 }
 
-func (t *TopologyEngine) PrepareForScheduling(ctx context.Context, pod *v1.Pod) (*Network[Nothing], error) {
+func (t *TopologyEngine) PrepareForPodScheduling(ctx context.Context, pod *v1.Pod) (*Network, error) {
 	if !t.topoReady {
 		if err := t.initTopologyState(ctx); err != nil {
 			return nil, err

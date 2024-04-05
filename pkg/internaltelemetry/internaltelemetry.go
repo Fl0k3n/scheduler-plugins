@@ -25,12 +25,12 @@ type InternalTelemetry struct {
 	handle     framework.Handle
 	topoEngine *core.TopologyEngine
 	schedEngine *core.TelemetrySchedulingEngine
+	tracker *core.TelemetrySchedulingTracker
 	deplMgr *core.DeploymentManager
 }
 
+var _ framework.PreScorePlugin = &InternalTelemetry{}
 var _ framework.ScorePlugin = &InternalTelemetry{}
-var _ framework.FilterPlugin = &InternalTelemetry{}
-var _ framework.PreFilterPlugin = &InternalTelemetry{}
 
 func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	klog.Info("initializing internal telemetry plugin: v0.0.1")
@@ -46,6 +46,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	}
 	topoEngine := core.NewTopologyEngine(client)
 	deplMgr := core.NewDeploymentManager(client)
+	tracker := core.NewTelemetrySchedulingTracker(client)
 	schedEngine := core.NewTelemetrySchedulingEngine(core.DefaultTelemetrySchedulingEngineConfig())
 
 	return &InternalTelemetry{
@@ -53,6 +54,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 		handle: handle,	
 		topoEngine: topoEngine,
 		schedEngine: schedEngine,
+		tracker: tracker,
 		deplMgr: deplMgr,
 	}, nil
 }
@@ -62,61 +64,33 @@ func (ts *InternalTelemetry) Name() string {
 	return Name
 }
 
-func (ts *InternalTelemetry) PreFilter(
+func (ts *InternalTelemetry) PreScore(
 	ctx context.Context,
 	state *framework.CycleState,
 	pod *v1.Pod,
-) (*framework.PreFilterResult, *framework.Status) {
+	nodes []*v1.Node,
+) *framework.Status {
 	var err error
-	var network *core.Network[core.Nothing]
+	var network *core.Network
 	var intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
 	var podsDeplName string
-	if network, err = ts.topoEngine.PrepareForScheduling(ctx, pod); err != nil {
+	if network, err = ts.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
 	}
 	if intdepl, podsDeplName, err = ts.deplMgr.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
 	}
+	ts.tracker.PrepareForPodScheduling(intdepl)
+
 	_ = podsDeplName // TOOD
-	ts.schedEngine.PrepareForScheduling(network, intdepl.Name, []core.ScheduledNode{}) // TODO we need tracker of scheduled nodes
-	return nil, nil
+	ts.schedEngine.PrepareForPodScheduling(network, intdepl, []core.ScheduledNode{}) // TODO we need tracker of scheduled nodes
+	return nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)
-	return nil, framework.AsStatus(err)
+	return framework.AsStatus(err)
 }
 
 func (ts *InternalTelemetry) PreFilterExtensions() framework.PreFilterExtensions {
-	return nil
-}
-
-func (ts *InternalTelemetry) Filter(
-	ctx context.Context,
-	state *framework.CycleState,
-	pod *v1.Pod,
-	nodeInfo *framework.NodeInfo,
-) *framework.Status {
-	// topologies := &shimv1alpha.TopologyList{}
-	// if err := ts.List(ctx, topologies); err != nil {
-	// 	klog.Errorf("Failed to fetch topologies %e", err)
-	// }
-	// incSwitches := &shimv1alpha.IncSwitchList{}
-	// if err := ts.List(ctx, incSwitches); err != nil {
-	// 	klog.Errorf("Failed to fetch incswitches %e", err)
-	// }
-	// klog.Infof("Filtering node %s for pod %s", nodeInfo.Node().Name, pod.Name)
-	// // if nodeInfo.Node().Name == "test-worker2" {
-	// if nodeInfo.Node().Name == "" { // TODO clear this
-	// 	klog.Infof("Node %s didn't pass filter", nodeInfo.Node().Name)
-	// 	return framework.NewStatus(framework.UnschedulableAndUnresolvable, "not here ;/")
-	// }
-
-	// intdepl := &intv1alpha.InternalInNetworkTelemetryDeployment{}
-	// ownerName := pod.Labels[INTERNAL_TELEMETRY_POD_DEPLOYMENT_OWNER_LABEL]
-	// resourceKey := types.NamespacedName{Name: ownerName, Namespace: pod.Namespace}
-	// if err := ts.Get(ctx, resourceKey, intdepl); err != nil {
-	// 	return framework.AsStatus(err)
-	// }
-
 	return nil
 }
 
