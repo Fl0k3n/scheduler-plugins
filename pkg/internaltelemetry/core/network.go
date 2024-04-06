@@ -1,7 +1,7 @@
 package core
 
 import (
-	"maps"
+	"golang.org/x/exp/maps"
 
 	"github.com/gammazero/deque"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"

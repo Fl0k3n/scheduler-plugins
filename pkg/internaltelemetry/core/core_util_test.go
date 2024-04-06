@@ -1,8 +1,9 @@
 package core
 
 import (
-	"slices"
 	"testing"
+
+	"golang.org/x/exp/slices"
 )
 
 func TestScheduledNodes(t *testing.T) {

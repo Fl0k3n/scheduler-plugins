@@ -2,8 +2,9 @@ package core
 
 import (
 	"context"
-	"slices"
 	"testing"
+
+	"golang.org/x/exp/slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"

@@ -1,9 +1,10 @@
 package core
 
 import (
-	"maps"
-	"slices"
 	"sync"
+
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
 type ScheduledNode struct {
