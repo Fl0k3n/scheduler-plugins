@@ -161,6 +161,19 @@ func TestSchedulingTracker(t *testing.T) {
 			},
 		}
 	}
+	type reservation struct {
+		pod *v1.Pod
+		deplName string
+		nodeName string
+	}
+	rsv := func (podName, deplName, nodeName string) reservation {
+		return reservation{
+			pod: makePod(podName, deplName, ""),
+			deplName: deplName,
+			nodeName: nodeName,
+		}
+	}
+
 	merge := mergeScheduledNodes
 	t.Run("scheduled nodes and queued pods are correctly computed", func(t *testing.T) {
 		tests := []struct{
@@ -168,6 +181,7 @@ func TestSchedulingTracker(t *testing.T) {
 			intdepl 				*intv1alpha.InternalInNetworkTelemetryDeployment
 			podsDeploymentName 		string
 			scheduledPods           []*v1.Pod
+			reservations 			[]reservation
 			expectedScheduledNodes  []ScheduledNode
 			expectedQueuedPods 		QueuedPods
 		}{
@@ -176,6 +190,7 @@ func TestSchedulingTracker(t *testing.T) {
 				intdepl: intDepl(2, 2),
 				podsDeploymentName: depl1,
 				scheduledPods: []*v1.Pod{},
+				reservations: []reservation{},
 				expectedScheduledNodes: []ScheduledNode{},
 				expectedQueuedPods: queuedPods(1, 2),
 			},
@@ -184,6 +199,7 @@ func TestSchedulingTracker(t *testing.T) {
 				intdepl: intDepl(3, 3),
 				podsDeploymentName: depl1,
 				scheduledPods: []*v1.Pod{makePod("p1", depl1, "n1"), makePod("p2", depl2, "n1"), makePod("p3", depl2, "n2")},
+				reservations: []reservation{},
 				expectedScheduledNodes: merge(schedule(depl1, "n1"), schedule(depl2, "n1", "n2")),
 				expectedQueuedPods: queuedPods(1, 1),
 			},
@@ -192,19 +208,44 @@ func TestSchedulingTracker(t *testing.T) {
 				intdepl: intDepl(2, 2),
 				podsDeploymentName: depl1,
 				scheduledPods: []*v1.Pod{makePod("p1", depl1, "n1"), withoutIntDeplLabel(makePod("p2", "x", "n1"))},
+				reservations: []reservation{},
 				expectedScheduledNodes: schedule(depl1, "n1"),
 				expectedQueuedPods: queuedPods(0, 2),
 			},
+			{
+				name: "reservations contribute to tracked state",
+				intdepl: intDepl(3, 3),
+				podsDeploymentName: depl1,
+				scheduledPods: []*v1.Pod{},
+				reservations: []reservation{rsv("p1", depl1, "n1"), rsv("p2", depl2, "n1"), rsv("p3", depl2, "n2")},
+				expectedScheduledNodes: merge(schedule(depl1, "n1"), schedule(depl2, "n1", "n2")),
+				expectedQueuedPods: queuedPods(1, 1),
+			},
+			{
+				name: "reservations are correctly combined with scheduled nodes",
+				intdepl: intDepl(5, 5),
+				podsDeploymentName: depl1,
+				scheduledPods: []*v1.Pod{makePod("p1", depl1, "n1"), makePod("p2", depl2, "n1"), makePod("p3", depl2, "n2")},
+				reservations: []reservation{rsv("p4", depl1, "n1"), rsv("p5", depl2, "n3"), rsv("p6", depl1, "n4"), rsv("p7", depl2, "n4")},
+				expectedScheduledNodes: merge(schedule(depl1, "n1", "n4"), schedule(depl2, "n1", "n2", "n3", "n4")),
+				expectedQueuedPods: queuedPods(1, 1),
+			},
 		}
-		for _, tt := range tests {
+		for _, tt := range tests[3:] {
 			t.Run(tt.name, func(t *testing.T) {
 				objs := []runtime.Object{tt.intdepl}
 				for _, pod := range tt.scheduledPods {
 					objs = append(objs, pod)
 				}
+				for _, r := range tt.reservations {
+					objs = append(objs, r.pod)
+				}
 				client := newFakeClient(t, objs...)
 				tracker := NewTelemetrySchedulingTracker(client)
 				tracker.PrepareForPodScheduling(tt.intdepl)
+				for _, r := range tt.reservations {
+					tracker.ReserveForScheduling(tt.intdepl, r.nodeName, r.deplName, r.pod.Name)
+				}
 				ctx := context.Background()
 				scheduledNodes, queuedPods, err := tracker.GetSchedulingState(ctx, tt.intdepl, tt.podsDeploymentName)
 				if err != nil {

@@ -3,6 +3,7 @@ package core
 import (
 	"maps"
 	"slices"
+	"sync"
 )
 
 type ScheduledNode struct {
@@ -102,9 +103,21 @@ func (s *ScheduluedCounters) Get(deplName string) int {
 	return 0
 }
 
+type ReservationMeta struct {
+	NodeName string
+	PodsDeploymentName string
+}
+
 type ReservationState struct {
-	Reservations []ScheduledNode
-	ScheduledCounters *ScheduluedCounters
+	StateLock sync.Mutex
+	Reservations map[string]ReservationMeta // key is podName 
+}
+
+func newReservationState () *ReservationState {
+	return &ReservationState{
+		StateLock: sync.Mutex{},
+		Reservations: map[string]ReservationMeta{},
+	}
 }
 
 type DeploymentSchedulingState struct {

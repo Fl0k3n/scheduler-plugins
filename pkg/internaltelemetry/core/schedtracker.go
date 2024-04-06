@@ -3,10 +3,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
@@ -14,24 +14,25 @@ import (
 
 type TelemetrySchedulingTracker struct {
 	client client.Client
-	reservations map[types.NamespacedName]*ReservationState // key is namespaced name of intdepl 
+
+	// types.NamespacedName -> *ReservationState, key is namespaced name of intdepl
+	// reservation handling must be thread-safe as it may be called from different contexts
+	reservations sync.Map 
 }
 
 func NewTelemetrySchedulingTracker(client client.Client) *TelemetrySchedulingTracker {
 	return &TelemetrySchedulingTracker{
 		client: client,
-		reservations: map[types.NamespacedName]*ReservationState{},
+		reservations: sync.Map{},
 	}	
 }
 
 func (t *TelemetrySchedulingTracker) PrepareForPodScheduling(
 	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
 ) {
-	if _, ok := t.reservations[client.ObjectKeyFromObject(intdepl)]; !ok {
-		t.reservations[client.ObjectKeyFromObject(intdepl)] = &ReservationState{
-			Reservations: []ScheduledNode{},
-			ScheduledCounters: newScheduledCounters(),
-		}
+	// this is the only place where it can be set so non-atomic read & write is ok
+	if _, ok := t.reservations.Load(client.ObjectKeyFromObject(intdepl)); !ok {
+		t.reservations.Store(client.ObjectKeyFromObject(intdepl), newReservationState())
 	}
 }
 
@@ -44,9 +45,9 @@ func (t *TelemetrySchedulingTracker) GetSchedulingState(
 	if err != nil {
 		return nil, QueuedPods{}, err
 	}
-	scheduledAndReserved := t.reservations[client.ObjectKeyFromObject(intdepl)]
-	scheduledNodes := mergeScheduledNodes(scheduledAndBound, scheduledAndReserved.Reservations)
-	counters := scheduledCounters.CombinedWith(scheduledAndReserved.ScheduledCounters)
+	reservedNodes, reservedCounters := t.getReservedSchedulingState(intdepl)
+	scheduledNodes := mergeScheduledNodes(scheduledAndBound, reservedNodes)
+	counters := scheduledCounters.CombinedWith(reservedCounters)
 
 	queuedPods := newQueuedPods()
 	for _, depl := range intdepl.Spec.DeploymentTemplates {
@@ -55,7 +56,7 @@ func (t *TelemetrySchedulingTracker) GetSchedulingState(
 			alreadyScheduled++
 		}
 		if depl.Template.Replicas == nil {
-			return nil, QueuedPods{}, fmt.Errorf("deployment template %s doesn't have number of replicas", depl.Name)
+			return nil, QueuedPods{}, fmt.Errorf("deployment template %s doesn't have number of replicas set", depl.Name)
 		}
 		remainingPods := int(*depl.Template.Replicas - int32(alreadyScheduled))
 		if remainingPods < 0 {
@@ -68,15 +69,61 @@ func (t *TelemetrySchedulingTracker) GetSchedulingState(
 	return scheduledNodes, queuedPods, nil
 }
 
+func (t *TelemetrySchedulingTracker) getReservedSchedulingState(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+) ([]ScheduledNode, *ScheduluedCounters) {
+	key := client.ObjectKeyFromObject(intdepl)
+	reservationState, ok := t.reservations.Load(key)
+	scheduledNodes := []ScheduledNode{}
+	counters := newScheduledCounters()
+	if !ok {
+		klog.Errorf("Reservation state for %v not found", key)
+		return scheduledNodes, counters
+	}
+	rs := reservationState.(*ReservationState)
+	rs.StateLock.Lock()
+	defer rs.StateLock.Unlock()
+	for _, v := range rs.Reservations {
+		scheduledNodes = markScheduled(scheduledNodes, v.NodeName, v.PodsDeploymentName)
+		counters.Increment(v.PodsDeploymentName)
+	}
+	return scheduledNodes, counters
+}
+
 func (t *TelemetrySchedulingTracker) ReserveForScheduling(
 	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
 	nodeName string,
-	podsDeploymentNames string,
+	podsDeploymentName string,
+	podName string,
 ) {
-	reservations := t.reservations[client.ObjectKeyFromObject(intdepl)]
-	reservations.Reservations = markScheduled(reservations.Reservations, nodeName, podsDeploymentNames)
-	reservations.ScheduledCounters.Increment(podsDeploymentNames)
-	t.reservations[client.ObjectKeyFromObject(intdepl)] = reservations
+	key := client.ObjectKeyFromObject(intdepl)
+	reservationState, ok := t.reservations.Load(key)
+	if !ok {
+		klog.Errorf("Reservation state for %v not found", key)
+		return
+	}
+	rs := reservationState.(*ReservationState)
+	rs.StateLock.Lock()
+	defer rs.StateLock.Unlock()
+	rs.Reservations[podName] = ReservationMeta{
+		NodeName: nodeName,
+		PodsDeploymentName: podsDeploymentName,
+	}
+}
+
+// idempotent, if reservation was not present function doesn't do anything
+func (t *TelemetrySchedulingTracker) RemoveSchedulingReservation(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+	podName string,
+) {
+	key := client.ObjectKeyFromObject(intdepl)
+	if reservationState, ok := t.reservations.Load(key); ok {
+		// TODO we also need to delete t.reservations[key] when last reservation was removed
+		rs := reservationState.(*ReservationState)
+		rs.StateLock.Lock()
+		defer rs.StateLock.Unlock()
+		delete(rs.Reservations, podName)
+	}
 }
 
 func (t *TelemetrySchedulingTracker) loadScheduledNodesForBoundPods(

@@ -2,6 +2,7 @@ package internaltelemetry
 
 import (
 	"context"
+	"errors"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -85,6 +86,16 @@ func (t *InternalTelemetry) Name() string {
 	return Name
 }
 
+func (t *InternalTelemetry) mustGetTelemetryCycleState(cycleState *framework.CycleState) *TelemetryCycleState {
+	ts, err := cycleState.Read(TELEMETRY_CYCLE_STATE_KEY)
+	if err != nil {
+		er := errors.New("assertion failed, telemetry cycle state is not set")
+		klog.Error(er)
+		panic(er)
+	}
+	return ts.(*TelemetryCycleState)
+}
+
 func (t *InternalTelemetry) PreScore(
 	ctx context.Context,
 	state *framework.CycleState,
@@ -129,11 +140,7 @@ func (t *InternalTelemetry) Score(
 	nodeName string,
 ) (int64, *framework.Status) {
 	klog.Infof("Scoring node %s for pod %s", nodeName, p.Name)
-	ts, err := state.Read(TELEMETRY_CYCLE_STATE_KEY)
-	if err != nil {
-		return 0, framework.AsStatus(err)
-	}
-	telemetryState := ts.(*TelemetryCycleState)
+	telemetryState := t.mustGetTelemetryCycleState(state)
 	score := t.schedEngine.ComputeNodeSchedulingScore(
 		telemetryState.Network,
 		nodeName,
@@ -143,7 +150,7 @@ func (t *InternalTelemetry) Score(
 		telemetryState.ScheduledNodes,
 		telemetryState.QueuedPods,
 	)
-	klog.Info("Node %s score for pod %s = %d", nodeName, p.Name, score)
+	klog.Infof("Node %s score for pod %s = %d", nodeName, p.Name, score)
 	return int64(score), nil
 }
 
@@ -189,6 +196,8 @@ func (t *InternalTelemetry) Reserve(
 	p *v1.Pod,
 	nodeName string,
 ) *framework.Status {
+	ts := t.mustGetTelemetryCycleState(state)
+	t.tracker.ReserveForScheduling(ts.Intdepl, nodeName, ts.PodsDeploymentName, p.Name)
 	return nil
 }
 
@@ -198,7 +207,8 @@ func (t *InternalTelemetry) Unreserve(
 	p *v1.Pod,
 	nodeName string,
 ) {
-
+	ts := t.mustGetTelemetryCycleState(state)
+	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
 }
 
 func (t *InternalTelemetry) PostBind(
@@ -207,5 +217,7 @@ func (t *InternalTelemetry) PostBind(
 	p *v1.Pod,
 	nodeName string,
 ) {
-
+	ts := t.mustGetTelemetryCycleState(state)
+	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
+	// TODO: check if this was the last pod and cleanup
 }
