@@ -42,17 +42,17 @@ func (t *TopologyEngine) loadTopology(ctx context.Context) error {
 	return nil
 }
 
-func (t *TopologyEngine) hasTelemetryEnabled(sw *shimv1alpha.IncSwitch, program *shimv1alpha.P4Program) bool {
-	canBeInstalled := false
-	for _, artifact := range program.Spec.Artifacts {
-		if artifact.Arch == sw.Spec.Arch {
-			canBeInstalled = true
-			break
-		}
-	}
-	if !canBeInstalled {
-		return false
-	}
+func (t *TopologyEngine) hasTelemetryEnabled(_ *shimv1alpha.IncSwitch, program *shimv1alpha.P4Program) bool {
+	// canBeInstalled := false
+	// for _, artifact := range program.Spec.Artifacts {
+	// 	if artifact.Arch == sw.Spec.Arch {
+	// 		canBeInstalled = true
+	// 		break
+	// 	}
+	// }
+	// if !canBeInstalled {
+	// 	return false
+	// }
 	for _, implementedInterface := range program.Spec.ImplementedInterfaces {
 		if implementedInterface == TELEMETRY_INTERFACE {
 			return true

@@ -28,6 +28,12 @@ type InternalInNetworkTelemetryEndpointsEntry struct {
 	PodReference v1.ObjectReference `json:"podReference"`
 	EntryStatus EndpointsEntryStatus `json:"entryStatus"`
 	NodeName string `json:"nodeName"`
+	PodIp string `json:"podIp"`
+}
+
+type DeploymentEndpoints struct {
+	DeploymentName string `json:"deploymentName"`
+	Entries []InternalInNetworkTelemetryEndpointsEntry `json:"entries"`
 }
 
 // InternalInNetworkTelemetryEndpointsSpec defines the desired state of InternalInNetworkTelemetryEndpoints
@@ -36,9 +42,8 @@ type InternalInNetworkTelemetryEndpointsSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Foo is an example field of InternalInNetworkTelemetryEndpoints. Edit internalinnetworktelemetryendpoints_types.go to remove/update
-	Entries []InternalInNetworkTelemetryEndpointsEntry `json:"entries"`
+	DeploymentEndpoints []DeploymentEndpoints `json:"deploymentEndpoints"`
 	CollectorNodeName string `json:"collectorNodeName"`
-	ProgramName string `json:"programName"`
 }
 
 // InternalInNetworkTelemetryEndpointsStatus defines the observed state of InternalInNetworkTelemetryEndpoints
