@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -25,47 +24,54 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-type NamedDeploymentSpec struct {
-	Template appsv1.DeploymentSpec `json:"template"`
-	Name string `json:"name"`
-}
-
-
-// InternalInNetworkTelemetryDeploymentSpec defines the desired state of InternalInNetworkTelemetryDeployment
-type InternalInNetworkTelemetryDeploymentSpec struct {
+// CollectorSpec defines the desired state of Collector
+type CollectorSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	DeploymentTemplates []NamedDeploymentSpec `json:"deployments"`
-	CollectorRef v1.LocalObjectReference `json:"collectorRef"`
+	PodSpec v1.PodSpec `json:"podSpec"`
 }
 
-// InternalInNetworkTelemetryDeploymentStatus defines the observed state of InternalInNetworkTelemetryDeployment
-type InternalInNetworkTelemetryDeploymentStatus struct {
+const (
+	TypeAvailableCollector = "Available"
+	TypeDegradedCollector = "Degraded"
+)
+
+// CollectorStatus defines the observed state of Collector
+type CollectorStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	// Represents the observations of a Memcached's current state.
+	// Collector.status.conditions.type are: "Available", "Progressing", and "Degraded"
+	// Collector.status.conditions.status are one of True, False, Unknown.
+
+	// Conditions store the status conditions of the Memcached instances
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+	NodeRef *v1.LocalObjectReference `json:"nodeRef,omitempty"`
+	Port *int32 `json:"port,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 
-// InternalInNetworkTelemetryDeployment is the Schema for the internalinnetworktelemetrydeployments API
-type InternalInNetworkTelemetryDeployment struct {
+// Collector is the Schema for the collectors API
+type Collector struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   InternalInNetworkTelemetryDeploymentSpec   `json:"spec,omitempty"`
-	Status InternalInNetworkTelemetryDeploymentStatus `json:"status,omitempty"`
+	Spec   CollectorSpec   `json:"spec,omitempty"`
+	Status CollectorStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// InternalInNetworkTelemetryDeploymentList contains a list of InternalInNetworkTelemetryDeployment
-type InternalInNetworkTelemetryDeploymentList struct {
+// CollectorList contains a list of Collector
+type CollectorList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []InternalInNetworkTelemetryDeployment `json:"items"`
+	Items           []Collector `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&InternalInNetworkTelemetryDeployment{}, &InternalInNetworkTelemetryDeploymentList{})
+	SchemeBuilder.Register(&Collector{}, &CollectorList{})
 }

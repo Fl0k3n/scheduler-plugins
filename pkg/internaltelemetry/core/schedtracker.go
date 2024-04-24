@@ -30,10 +30,7 @@ func NewTelemetrySchedulingTracker(client client.Client) *TelemetrySchedulingTra
 func (t *TelemetrySchedulingTracker) PrepareForPodScheduling(
 	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
 ) {
-	// this is the only place where it can be set so non-atomic read & write is ok
-	if _, ok := t.reservations.Load(client.ObjectKeyFromObject(intdepl)); !ok {
-		t.reservations.Store(client.ObjectKeyFromObject(intdepl), newReservationState())
-	}
+	t.reservations.LoadOrStore(client.ObjectKeyFromObject(intdepl), newReservationState())
 }
 
 func (t *TelemetrySchedulingTracker) GetSchedulingState(

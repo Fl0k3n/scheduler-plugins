@@ -682,7 +682,6 @@ func makeTestIintDepl(name string, namespace string, deplyoments []deploymentInf
 			Namespace: namespace,
 		},
 		Spec: intv1alpha.InternalInNetworkTelemetryDeploymentSpec{
-			RequiredProgram: "foo",
 			DeploymentTemplates: templates,
 		},
 	}

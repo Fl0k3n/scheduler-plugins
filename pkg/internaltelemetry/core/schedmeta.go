@@ -65,6 +65,7 @@ func (q *QueuedPods) AllQueued() bool {
 	return true
 }
 
+// Tracks per-deployment counts of numbers of scheduled (or reserved) pods
 type ScheduluedCounters struct {
 	counter map[string]int
 }
