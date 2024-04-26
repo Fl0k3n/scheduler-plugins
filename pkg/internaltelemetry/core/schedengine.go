@@ -328,10 +328,25 @@ func (t *TelemetrySchedulingEngine) ComputeNodeSchedulingScore(
 	if t.isDeploymentMemberAlreadyScheduledOnNode(nodeName, scheduledNodes, podsDeploymentName) {
 		return 0
 	}
-	nodeVertex := network.Vertices[nodeName]
+	nodeVertex, ok := network.Vertices[nodeName]
+	if !ok {
+		klog.Errorf("Invalid network state, node %s not found", nodeName)
+		return 0
+	}
 	state := t.mustLoadStateCopy(intdepl)
 
-	immediateGain := t.computeImmediatePortsGainedByScheduling(network, state, podsDeploymentName, nodeVertex, scheduledNodes)
+	somePodOfOppositeDeoploymentWasScheduled := false
+	if somePodOfOppositeDeoploymentWasScheduled {
+		// simply query H
+		return t.computeImmediatePortsGainedByScheduling(network, state, podsDeploymentName, nodeVertex, scheduledNodes)
+	} else {
+		// N := require a set of feasible nodes for pod of the opposite deployment
+		// mark pod scheduled on current node
+		// recompute H from each node in N
+		// return max H
+	}
+
+
 	scheduledNodes = deepCopyScheduledNodes(scheduledNodes)
 
 	scheduledNodes = t.markScheduled(network, state, scheduledNodes, podsDeploymentName, nodeVertex)

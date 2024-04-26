@@ -28,6 +28,7 @@ type TelemetryCycleState struct {
 	QueuedPods core.QueuedPods
 	Intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
 	PodsDeploymentName string
+	TelemetrySwitchesThatCantBeSources []string
 }
 
 // cycle state is treated as immutable and hence full shallow copy suffices
@@ -38,6 +39,7 @@ func (t *TelemetryCycleState) Clone() framework.StateData {
 		QueuedPods: t.QueuedPods,
 		Intdepl: t.Intdepl,
 		PodsDeploymentName: t.PodsDeploymentName,
+		TelemetrySwitchesThatCantBeSources: t.TelemetrySwitchesThatCantBeSources,
 	}
 }
 
@@ -48,6 +50,7 @@ type InternalTelemetry struct {
 	schedEngine *core.TelemetrySchedulingEngine
 	tracker *core.TelemetrySchedulingTracker
 	deplMgr *core.DeploymentManager
+	resourceHelper *core.ResourceHelper
 }
 
 var _ framework.PreScorePlugin = &InternalTelemetry{}
@@ -71,6 +74,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	deplMgr := core.NewDeploymentManager(client)
 	tracker := core.NewTelemetrySchedulingTracker(client)
 	schedEngine := core.NewTelemetrySchedulingEngine(core.DefaultTelemetrySchedulingEngineConfig())
+	resourceHelper := core.NewResourceHelper(client)
 
 	return &InternalTelemetry{
 		Client: client,
@@ -79,6 +83,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 		schedEngine: schedEngine,
 		tracker: tracker,
 		deplMgr: deplMgr,
+		resourceHelper: resourceHelper,
 	}, nil
 }
 
@@ -108,6 +113,7 @@ func (t *InternalTelemetry) PreScore(
 	var podsDeplName string
 	var scheduledNodes []core.ScheduledNode
 	var queuedPods core.QueuedPods
+	var switchesThatCantBeSources []string
 
 	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
@@ -120,13 +126,17 @@ func (t *InternalTelemetry) PreScore(
 		goto fail
 	}
 	t.schedEngine.PrepareForPodScheduling(network, intdepl, scheduledNodes)
+	switchesThatCantBeSources = t.resourceHelper.GetTelemetrySwitchesThatCantBeSources(ctx, intdepl.Namespace)
 	state.Write(TELEMETRY_CYCLE_STATE_KEY, &TelemetryCycleState{
 		Network: network,
 		ScheduledNodes: scheduledNodes,
 		QueuedPods: queuedPods,
 		Intdepl: intdepl,
 		PodsDeploymentName: podsDeplName,
+		TelemetrySwitchesThatCantBeSources: switchesThatCantBeSources,
 	})
+
+	// compute H for each feasible node and store in TelemetryCycleState
 	return nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)
@@ -149,6 +159,7 @@ func (t *InternalTelemetry) Score(
 		telemetryState.PodsDeploymentName,
 		telemetryState.ScheduledNodes,
 		telemetryState.QueuedPods,
+		// pass H
 	)
 	klog.Infof("Node %s score for pod %s = %d", nodeName, p.Name, score)
 	return int64(score), nil
@@ -173,7 +184,7 @@ func (t *InternalTelemetry) NormalizeScore(
 	klog.Infof("min score: %d, max score: %d", minScore, maxScore)
 	if minScore == maxScore {
 		for node := range scores {
-			scores[node].Score = framework.MinNodeScore
+			scores[node].Score = framework.MaxNodeScore
 		}
 	} else {
 		for node, score := range scores {
