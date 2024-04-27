@@ -15,25 +15,23 @@ type MemoKey = string
 type CountingEngine struct {
 	network *Network
 	nodesWithOppositeDeployment map[string]struct{}
-	telemetryEnabledSwitches map[string]struct{}
-	schedulingState *DeploymentSchedulingState
+	portState *TelemetryPortState
 
 	HMemo map[MemoKey]int
 	FMemo map[MemoKey]int
 	RMemo map[MemoKey]reachabilityInfo
 }
 
+// arguments are treated as immutable
 func newCountingEngine(
 	network *Network, 
 	nodesWithOppositeDeployment map[string]struct{},
-	telemetryEnabledSwitches map[string]struct{},
-	schedulingState *DeploymentSchedulingState,
+	portState *TelemetryPortState,
 ) *CountingEngine {
 	return &CountingEngine{
 		network: network,
 		nodesWithOppositeDeployment: nodesWithOppositeDeployment,
-		telemetryEnabledSwitches: telemetryEnabledSwitches,
-		schedulingState: schedulingState,
+		portState: portState,
 		HMemo: map[MemoKey]int{},
 		FMemo: map[MemoKey]int{},
 		RMemo: map[MemoKey]reachabilityInfo{},
@@ -44,13 +42,8 @@ func (e *CountingEngine) memoKey(u *Vertex, v *Vertex) MemoKey {
 	return fmt.Sprintf("%s->%s", u.Name, v.Name)
 }
 
-func (e *CountingEngine) runsOppositeDeploymentPod(v *Vertex) bool {
-	_, ok := e.nodesWithOppositeDeployment[v.Name]
-	return ok
-}
-
 func (e *CountingEngine) isTelemetrySwitch(v *Vertex) bool {
-	_, ok := e.telemetryEnabledSwitches[v.Name]	
+	_, ok := e.network.TelemetryEnabledSwitches[v.Name]	
 	return ok
 }
 
@@ -59,9 +52,16 @@ func (e *CountingEngine) children(u *Vertex, v *Vertex) []*Vertex {
 	if u == v.Parent {
 		return v.Children
 	}
-	res := make([]*Vertex, len(v.Children))
-	res[0] = v.Parent
-	j := 1
+	numChildren := len(v.Children)
+	if v.Parent == nil {
+		numChildren--
+	}
+	res := make([]*Vertex, numChildren)
+	j := 0
+	if v.Parent != nil {
+		res[0] = v.Parent
+		j = 1
+	}
 	for _, child := range v.Children {
 		if child != u {
 			res[j] = child
@@ -86,7 +86,7 @@ func (e *CountingEngine) getReachability(u *Vertex, v *Vertex) reachabilityInfo 
 			if r.reaches {
 				res.reaches = true
 				res.throughAtLeastOneINTswitch = r.throughAtLeastOneINTswitch
-				if _, isTelemetrySwitch := e.telemetryEnabledSwitches[v.Name]; isTelemetrySwitch {
+				if _, isTelemetrySwitch := e.network.TelemetryEnabledSwitches[v.Name]; isTelemetrySwitch {
 					res.throughAtLeastOneINTswitch = true
 				}
 				break
@@ -98,18 +98,17 @@ func (e *CountingEngine) getReachability(u *Vertex, v *Vertex) reachabilityInfo 
 }
 
 func (e *CountingEngine) R(u *Vertex, v *Vertex) int {
-	if !e.getReachability(u, v).reaches {
-		return 0
+	if e.getReachability(u, v).reaches {
+		return 1
 	}
-	return 1
+	return 0
 }
 
-// is v a telemetry switch and it's port to u is available
-func (e *CountingEngine) AllocGain(u *Vertex, v *Vertex) int {
-	if _, isTelemetrySwitch := e.telemetryEnabledSwitches[v.Name]; !isTelemetrySwitch {
+func (e *CountingEngine) Q(u *Vertex, v *Vertex) int {
+	if _, isTelemetrySwitch := e.network.TelemetryEnabledSwitches[v.Name]; !isTelemetrySwitch {
 		return 0
 	}
-	if _, available := e.schedulingState.PortMetaOf(v).AvailableTelemetryPorts[u.Name]; !available {
+	if _, available := e.portState.PortMetaOf(v).AvailableTelemetryPorts[u.Name]; !available {
 		return 0
 	}
 	return 1
@@ -124,9 +123,9 @@ func (e *CountingEngine) F(u *Vertex, v *Vertex) int {
 	if v.IsLeaf() {
 		res = 0
 	} else {
-		res = e.AllocGain(u, v) * e.R(u, v)
+		res = e.Q(u, v) * e.R(u, v)
 		for _, k := range e.children(u, v) {
-			res += e.F(v, k) + (e.AllocGain(k, v) * e.R(v, k))
+			res += e.F(v, k) + (e.Q(k, v) * e.R(v, k))
 		}
 	}
 	e.FMemo[key] = res
@@ -148,11 +147,11 @@ func (e *CountingEngine) H(u *Vertex, v *Vertex) int {
 			r := e.getReachability(v, k)
 			if r.reaches && r.throughAtLeastOneINTswitch {
 				someChildReachesOppositePodThroughINTSwitch = true
-				res += e.AllocGain(k, v)
+				res += e.Q(k, v)
 			}
 		}
 		if someChildReachesOppositePodThroughINTSwitch {
-			res += e.AllocGain(u, v)
+			res += e.Q(u, v)
 		}
 	} else {
 		for _, k := range e.children(u, v) {
@@ -164,10 +163,18 @@ func (e *CountingEngine) H(u *Vertex, v *Vertex) int {
 }
 
 // calling it from required sources guarantees that memos will be filled and 
-// later queries will return in O(1) without modifying anything
-func (e *CountingEngine) ComputeHfunc(requiredSources []string) {
+// later queries will return in O(1) without modifying anything (and are thus thread-safe)
+func (e *CountingEngine) Precompute(requiredSources []string) {
 	for _, src := range requiredSources {
 		nodeVertex := e.network.Vertices[src]
 		e.H(nodeVertex, nodeVertex.Parent)
+	}
+}
+
+func (e *CountingEngine) GetNumberOfNewINTPortsCoverableBySchedulingOn(node *Vertex) int {
+	if res, memoed := e.HMemo[e.memoKey(node, node.Parent)]; memoed {
+		return res
+	} else {
+		panic(fmt.Sprintf("H not memoized for node %s, recomputing is unsafe in multi-threaded env", node.Name))
 	}
 }

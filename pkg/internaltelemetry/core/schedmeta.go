@@ -5,6 +5,7 @@ import (
 
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
+	v1 "k8s.io/api/core/v1"
 )
 
 type ScheduledNode struct {
@@ -122,38 +123,63 @@ func newReservationState () *ReservationState {
 	}
 }
 
-type DeploymentSchedulingState struct {
+type TelemetryPortState struct {
 	portMeta []*TelemetryPortsMeta
 }
 
-func newDeploymentSchedulingState(network *Network) *DeploymentSchedulingState {
+func newTelemetryPortState(network *Network) *TelemetryPortState {
 	portMeta := make([]*TelemetryPortsMeta, len(network.Vertices))
 	for i := range portMeta {
 		portMeta[i] = nil
 	}
-	return &DeploymentSchedulingState{
+	return &TelemetryPortState{
 		portMeta: portMeta,
 	}
 }
 
-func (d *DeploymentSchedulingState) SetPortMetaOf(v *Vertex, meta *TelemetryPortsMeta) {
-	d.portMeta[v.Ordinal] = meta
+func (t *TelemetryPortState) SetPortMetaOf(v *Vertex, meta *TelemetryPortsMeta) {
+	t.portMeta[v.Ordinal] = meta
 }
 
-func (d *DeploymentSchedulingState) PortMetaOf(v *Vertex) *TelemetryPortsMeta {
-	return d.portMeta[v.Ordinal]
+func (t *TelemetryPortState) PortMetaOf(v *Vertex) *TelemetryPortsMeta {
+	return t.portMeta[v.Ordinal]
 }
 
-func (d *DeploymentSchedulingState) DeepCopy() *DeploymentSchedulingState {
-	portMeta := make([]*TelemetryPortsMeta, len(d.portMeta))
-	for i, p := range d.portMeta {
+func (t *TelemetryPortState) DeepCopy() *TelemetryPortState {
+	portMeta := make([]*TelemetryPortsMeta, len(t.portMeta))
+	for i, p := range t.portMeta {
 		if p != nil {
 			portMeta[i] = p.DeepCopy()
 		} else {
 			portMeta[i] = nil
 		}
 	}
-	return &DeploymentSchedulingState{
+	return &TelemetryPortState{
 		portMeta: portMeta,
 	}
+}
+
+type DeploymentSchedulingState struct {
+	portState *TelemetryPortState
+	countingEngine *CountingEngine
+	nodesWithOppositeDeployment map[string]struct{}
+	feasibleNodesForOppositeDeployment *[]*v1.Node
+}
+
+func newDeploymentSchedulingState(
+	portState *TelemetryPortState,
+	countingEngine *CountingEngine,
+	nodesWithOppositeDeployment map[string]struct{},
+	feasibleNodesForOppositeDeployment *[]*v1.Node,
+) *DeploymentSchedulingState {
+	return &DeploymentSchedulingState{
+		portState: portState,	
+		countingEngine: countingEngine,
+		nodesWithOppositeDeployment: nodesWithOppositeDeployment,
+		feasibleNodesForOppositeDeployment: feasibleNodesForOppositeDeployment,
+	}
+}
+
+func (d *DeploymentSchedulingState) PortMetaOf(v *Vertex) *TelemetryPortsMeta {
+	return d.portState.PortMetaOf(v)
 }

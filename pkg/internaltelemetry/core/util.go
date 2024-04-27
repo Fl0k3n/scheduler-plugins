@@ -1,6 +1,8 @@
 package core
 
 import (
+	v1 "k8s.io/api/core/v1"
+	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
 
@@ -16,14 +18,6 @@ func toOrdinalsByDeviceName(topo *shimv1alpha.Topology) map[string]int {
 	res := make(map[string]int, len(topo.Spec.Graph))
 	for i, dev := range topo.Spec.Graph {
 		res[dev.Name] = i
-	}
-	return res
-}
-
-func deepCopyScheduledNodes(sns []ScheduledNode) []ScheduledNode {
-	res := make([]ScheduledNode, len(sns))
-	for i, sn := range sns {
-		res[i] = sn.DeepCopy()
 	}
 	return res
 }
@@ -61,6 +55,37 @@ func mergeScheduledNodes (sn1 []ScheduledNode, sn2 []ScheduledNode) []ScheduledN
 			i++
 		}
 		res = append(res, ScheduledNode{nodeName, deplsSlice})
+	}
+	return res
+}
+
+func getOppositeDeployment(
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+	podDeplName string,
+) string {
+	for _, depl := range intdepl.Spec.DeploymentTemplates {
+		if depl.Name != podDeplName {
+			return depl.Name
+		}
+	}
+	panic("opposite deployment not found")
+}
+
+
+func getNodesWithDeployment(sn []ScheduledNode, deplName string) map[string]struct {} {
+	res := map[string]struct{}{}
+	for _, node := range sn {
+		if node.HasScheduled(deplName) {
+			res[node.Name] = struct{}{}
+		}
+	}
+	return res
+}
+
+func extractNames(nodes []*v1.Node) []string {
+	res := make([]string, len(nodes))
+	for i, node := range nodes {
+		res[i] = node.Name
 	}
 	return res
 }

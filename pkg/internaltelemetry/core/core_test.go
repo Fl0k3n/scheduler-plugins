@@ -333,7 +333,7 @@ func TestScoringEngine(t *testing.T) {
 				telemetrySwitches: allV4IncSwitches(),
 				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
-				scheduledNodes: schedule("depl2", "w1", "w4"),
+				scheduledNodes: schedule(depl2, "w1", "w4"),
 			},
 			{	
 				name: "all ports on path between between 2 pods of different deployments are used",
@@ -341,7 +341,7 @@ func TestScoringEngine(t *testing.T) {
 				telemetrySwitches: allV4IncSwitches(),
 				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
-				scheduledNodes: merge(schedule("depl1", "w1"), schedule("depl2", "w4")),
+				scheduledNodes: merge(schedule(depl1, "w1"), schedule(depl2, "w4")),
 				expectedUsedPorts: []switchPort{
 					{"r5", "w1", false},
 					{"r5", "r1", true},
@@ -357,7 +357,7 @@ func TestScoringEngine(t *testing.T) {
 				telemetrySwitches: allV4IncSwitches(),
 				pod: makePod("p1", depl1),
 				intdepl: intDepl(3, 2),
-				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4", "w5")),
+				scheduledNodes: merge(schedule(depl1, "w1", "w3"), schedule(depl2, "w4", "w5")),
 				expectedUsedPorts: []switchPort{
 					{"r5", "w1", false},
 					{"r5", "r1", true},
@@ -379,7 +379,7 @@ func TestScoringEngine(t *testing.T) {
 				telemetrySwitches: []string{"r1", "r3", "r6"},
 				pod: makePod("p1", depl1),
 				intdepl: intDepl(3, 2),
-				scheduledNodes: merge(schedule("depl1", "w1", "w3"), schedule("depl2", "w4")),
+				scheduledNodes: merge(schedule(depl1, "w1", "w3"), schedule(depl2, "w4")),
 				expectedUsedPorts: []switchPort{
 					{"r1", "r5", false},
 					{"r1", "r0", false},
@@ -395,15 +395,17 @@ func TestScoringEngine(t *testing.T) {
 				telemetrySwitches: []string{"r5"},
 				pod: makePod("p1", depl1),
 				intdepl: intDepl(2, 2),
-				scheduledNodes: merge(schedule("depl1", "w1"), schedule("depl2", "w2")),
+				scheduledNodes: merge(schedule(depl1, "w1"), schedule(depl2, "w2")),
 				expectedUsedPorts: []switchPort{},
 			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				sched := NewTelemetrySchedulingEngine(DefaultTelemetrySchedulingEngineConfig())
+				sched := NewTelemetrySchedulingEngine()
+				feasibleNodes := allNodesFrom(tt.topo)
 				objs := []runtime.Object{tt.topo, tt.pod, tt.intdepl}
 				objs = append(objs, makeTestIncSwitchesForTopo(tt.topo, tt.telemetrySwitches)...)
+				objs = append(objs, asRuntimeObjects(feasibleNodes)...)
 				client := newFakeClient(t, objs...)
 				topoEngine := NewTopologyEngine(client)
 				ctx := context.Background()
@@ -411,8 +413,8 @@ func TestScoringEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				sched.PrepareForPodScheduling(net, tt.intdepl, tt.scheduledNodes)
-				schedState := sched.MustGetCachedDeploymentsNetworkView(tt.intdepl)
+				provider := func() *[]*v1.Node {return &feasibleNodes}
+				schedState := sched.PrepareForPodScheduling(net, tt.intdepl, depl1, feasibleNodes, provider, tt.scheduledNodes)
 
 				shouldBeUsed := func(from string, to string) bool {
 					for _, p := range tt.expectedUsedPorts {
@@ -533,10 +535,11 @@ func TestScoringEngine(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				testConfig := TelemetrySchedulingEngineConfig{ImmediateWeight: 1, FutureWeight: 1}
-				sched := NewTelemetrySchedulingEngine(testConfig)
+				sched := NewTelemetrySchedulingEngine()
+				feasibleNodes := allNodesFrom(tt.topo)
 				objs := []runtime.Object{tt.topo, tt.pod, tt.intdepl}
 				objs = append(objs, makeTestIncSwitchesForTopo(tt.topo, tt.telemetrySwitches)...)
+				objs = append(objs, asRuntimeObjects(feasibleNodes)...)
 				client := newFakeClient(t, objs...)
 				topoEngine := NewTopologyEngine(client)
 				ctx := context.Background()
@@ -544,11 +547,13 @@ func TestScoringEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				sched.PrepareForPodScheduling(net, tt.intdepl, tt.scheduledNodes)
+				provider := func() *[]*v1.Node {return &feasibleNodes}
+				deplSchedulingState := sched.PrepareForPodScheduling(net, tt.intdepl, tt.podsDeploymentName,
+					feasibleNodes, provider, tt.scheduledNodes)
 				for i := range tt.nodesToScore {
 					nodeName := tt.nodesToScore[i]
-					score := sched.ComputeNodeSchedulingScore(net, nodeName, tt.intdepl, tt.pod,
-						tt.podsDeploymentName, tt.scheduledNodes, tt.queuedPods)
+					score := sched.ComputeNodeSchedulingScore(net, deplSchedulingState, nodeName, tt.intdepl,
+						tt.pod, tt.podsDeploymentName, tt.scheduledNodes)
 					if score != tt.expectedScores[i] {
 						t.Errorf("Invalid score for node %s, expected %d got %d", nodeName, tt.expectedScores[i], score)
 					}
@@ -749,6 +754,25 @@ func makeTestIncSwitchesForTopoWithCustomPrograms(
 			}
 			res = append(res, incSwitch)
 		}
+	}
+	return res
+}
+
+func allNodesFrom(topo *shimv1alpha.Topology) []*v1.Node {
+	res := []*v1.Node{}
+	for _, device := range topo.Spec.Graph {
+		if device.DeviceType == shimv1alpha.NODE {
+			node := st.MakeNode().Name(device.Name).Obj()
+			res = append(res, node)
+		}
+	}
+	return res
+}
+
+func asRuntimeObjects(nodes []*v1.Node) []runtime.Object{
+	res := make([]runtime.Object, len(nodes))
+	for i, n := range nodes {
+		res[i] = n
 	}
 	return res
 }

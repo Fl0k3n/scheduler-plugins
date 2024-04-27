@@ -29,6 +29,7 @@ type TelemetryCycleState struct {
 	Intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
 	PodsDeploymentName string
 	TelemetrySwitchesThatCantBeSources []string
+	DeploymentSchedulingState *core.DeploymentSchedulingState
 }
 
 // cycle state is treated as immutable and hence full shallow copy suffices
@@ -40,6 +41,7 @@ func (t *TelemetryCycleState) Clone() framework.StateData {
 		Intdepl: t.Intdepl,
 		PodsDeploymentName: t.PodsDeploymentName,
 		TelemetrySwitchesThatCantBeSources: t.TelemetrySwitchesThatCantBeSources,
+		DeploymentSchedulingState: t.DeploymentSchedulingState,
 	}
 }
 
@@ -59,7 +61,7 @@ var _ framework.ReservePlugin = &InternalTelemetry{}
 var _ framework.PostBindPlugin = &InternalTelemetry{}
 
 func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) {
-	klog.Info("initializing internal telemetry plugin: v0.0.1")
+	klog.Info("initializing internal telemetry plugin: v0.0.7")
 
 	scheme := runtime.NewScheme()
 	_ = clientscheme.AddToScheme(scheme)
@@ -73,8 +75,8 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	topoEngine := core.NewTopologyEngine(client)
 	deplMgr := core.NewDeploymentManager(client)
 	tracker := core.NewTelemetrySchedulingTracker(client)
-	schedEngine := core.NewTelemetrySchedulingEngine(core.DefaultTelemetrySchedulingEngineConfig())
 	resourceHelper := core.NewResourceHelper(client)
+	schedEngine := core.NewTelemetrySchedulingEngine()
 
 	return &InternalTelemetry{
 		Client: client,
@@ -91,14 +93,24 @@ func (t *InternalTelemetry) Name() string {
 	return Name
 }
 
-func (t *InternalTelemetry) mustGetTelemetryCycleState(cycleState *framework.CycleState) *TelemetryCycleState {
+func (t *InternalTelemetry) getTelemetryCycleState(cycleState *framework.CycleState) (*TelemetryCycleState, error) {
 	ts, err := cycleState.Read(TELEMETRY_CYCLE_STATE_KEY)
 	if err != nil {
-		er := errors.New("assertion failed, telemetry cycle state is not set")
-		klog.Error(er)
-		panic(er)
+		err = errors.New("assertion failed, telemetry cycle state is not set")
+		klog.Error(err)
+		return nil, err
 	}
-	return ts.(*TelemetryCycleState)
+	return ts.(*TelemetryCycleState), nil
+}
+
+func (t *InternalTelemetry) getFeasibleNodesForOppositeDeploymentProvider(
+	feasibleNodesForThisDeployment []*v1.Node,	
+) func() *[]*v1.Node {
+	// TODO: find a way to reuse some of K8s internal mechanisms to figure this out
+	// for now we assume that the same nodes are feasible for both deployments
+	return func() *[]*v1.Node {
+		return &feasibleNodesForThisDeployment
+	}
 }
 
 func (t *InternalTelemetry) PreScore(
@@ -114,6 +126,7 @@ func (t *InternalTelemetry) PreScore(
 	var scheduledNodes []core.ScheduledNode
 	var queuedPods core.QueuedPods
 	var switchesThatCantBeSources []string
+	var deploymentSchedulingState *core.DeploymentSchedulingState
 
 	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
@@ -125,7 +138,14 @@ func (t *InternalTelemetry) PreScore(
 	if scheduledNodes, queuedPods, err = t.tracker.GetSchedulingState(ctx, intdepl, podsDeplName); err != nil {
 		goto fail
 	}
-	t.schedEngine.PrepareForPodScheduling(network, intdepl, scheduledNodes)
+	deploymentSchedulingState = t.schedEngine.PrepareForPodScheduling(
+		network,
+		intdepl,
+		podsDeplName,
+		nodes,
+		t.getFeasibleNodesForOppositeDeploymentProvider(nodes),
+		scheduledNodes,
+	)
 	switchesThatCantBeSources = t.resourceHelper.GetTelemetrySwitchesThatCantBeSources(ctx, intdepl.Namespace)
 	state.Write(TELEMETRY_CYCLE_STATE_KEY, &TelemetryCycleState{
 		Network: network,
@@ -134,9 +154,8 @@ func (t *InternalTelemetry) PreScore(
 		Intdepl: intdepl,
 		PodsDeploymentName: podsDeplName,
 		TelemetrySwitchesThatCantBeSources: switchesThatCantBeSources,
+		DeploymentSchedulingState: deploymentSchedulingState,
 	})
-
-	// compute H for each feasible node and store in TelemetryCycleState
 	return nil
 fail:
 	klog.Errorf("Failed to prepare for scheduling %e", err)
@@ -146,22 +165,24 @@ fail:
 func (t *InternalTelemetry) Score(
 	ctx context.Context,
 	state *framework.CycleState,
-	p *v1.Pod,
+	pod *v1.Pod,
 	nodeName string,
 ) (int64, *framework.Status) {
-	klog.Infof("Scoring node %s for pod %s", nodeName, p.Name)
-	telemetryState := t.mustGetTelemetryCycleState(state)
+	klog.Infof("Scoring node %s for pod %s", nodeName, pod.Name)
+	telemetryState, err := t.getTelemetryCycleState(state)
+	if err != nil {
+		return 0, framework.AsStatus(err)
+	}
 	score := t.schedEngine.ComputeNodeSchedulingScore(
 		telemetryState.Network,
+		telemetryState.DeploymentSchedulingState,
 		nodeName,
 		telemetryState.Intdepl,
-		p,
+		pod,
 		telemetryState.PodsDeploymentName,
 		telemetryState.ScheduledNodes,
-		telemetryState.QueuedPods,
-		// pass H
 	)
-	klog.Infof("Node %s score for pod %s = %d", nodeName, p.Name, score)
+	klog.Infof("Node %s score for pod %s = %d", nodeName, pod.Name, score)
 	return int64(score), nil
 }
 
@@ -207,7 +228,10 @@ func (t *InternalTelemetry) Reserve(
 	p *v1.Pod,
 	nodeName string,
 ) *framework.Status {
-	ts := t.mustGetTelemetryCycleState(state)
+	ts, err := t.getTelemetryCycleState(state)
+	if err != nil {
+		return framework.AsStatus(err)
+	}
 	t.tracker.ReserveForScheduling(ts.Intdepl, nodeName, ts.PodsDeploymentName, p.Name)
 	return nil
 }
@@ -218,7 +242,11 @@ func (t *InternalTelemetry) Unreserve(
 	p *v1.Pod,
 	nodeName string,
 ) {
-	ts := t.mustGetTelemetryCycleState(state)
+	ts, err := t.getTelemetryCycleState(state)
+	if err != nil {
+		klog.Errorf("failed to unreserve pod because telemetry cycle state wasn't found: %e", err)
+		return
+	}
 	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
 }
 
@@ -228,7 +256,11 @@ func (t *InternalTelemetry) PostBind(
 	p *v1.Pod,
 	nodeName string,
 ) {
-	ts := t.mustGetTelemetryCycleState(state)
+	ts, err := t.getTelemetryCycleState(state)
+	if err != nil {
+		klog.Errorf("failed to unreserve pod because telemetry cycle state wasn't found: %e", err)
+		return
+	}
 	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
 	// TODO: check if this was the last pod and cleanup
 }
