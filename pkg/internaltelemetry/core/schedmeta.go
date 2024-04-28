@@ -5,7 +5,6 @@ import (
 
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
-	v1 "k8s.io/api/core/v1"
 )
 
 type ScheduledNode struct {
@@ -159,27 +158,5 @@ func (t *TelemetryPortState) DeepCopy() *TelemetryPortState {
 	}
 }
 
-type DeploymentSchedulingState struct {
-	portState *TelemetryPortState
-	countingEngine *CountingEngine
-	nodesWithOppositeDeployment map[string]struct{}
-	feasibleNodesForOppositeDeployment *[]*v1.Node
-}
-
-func newDeploymentSchedulingState(
-	portState *TelemetryPortState,
-	countingEngine *CountingEngine,
-	nodesWithOppositeDeployment map[string]struct{},
-	feasibleNodesForOppositeDeployment *[]*v1.Node,
-) *DeploymentSchedulingState {
-	return &DeploymentSchedulingState{
-		portState: portState,	
-		countingEngine: countingEngine,
-		nodesWithOppositeDeployment: nodesWithOppositeDeployment,
-		feasibleNodesForOppositeDeployment: feasibleNodesForOppositeDeployment,
-	}
-}
-
-func (d *DeploymentSchedulingState) PortMetaOf(v *Vertex) *TelemetryPortsMeta {
-	return d.portState.PortMetaOf(v)
-}
+// must be thread-safe
+type NodeScoreProvider func(nodeName string) int

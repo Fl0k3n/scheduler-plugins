@@ -24,24 +24,22 @@ const (
 
 type TelemetryCycleState struct {
 	Network *core.Network
-	ScheduledNodes []core.ScheduledNode
 	QueuedPods core.QueuedPods
 	Intdepl *intv1alpha.InternalInNetworkTelemetryDeployment
 	PodsDeploymentName string
 	TelemetrySwitchesThatCantBeSources []string
-	DeploymentSchedulingState *core.DeploymentSchedulingState
+	ScoreProvider core.NodeScoreProvider
 }
 
 // cycle state is treated as immutable and hence full shallow copy suffices
 func (t *TelemetryCycleState) Clone() framework.StateData {
 	return &TelemetryCycleState{
 		Network: t.Network,
-		ScheduledNodes: t.ScheduledNodes,
 		QueuedPods: t.QueuedPods,
 		Intdepl: t.Intdepl,
 		PodsDeploymentName: t.PodsDeploymentName,
 		TelemetrySwitchesThatCantBeSources: t.TelemetrySwitchesThatCantBeSources,
-		DeploymentSchedulingState: t.DeploymentSchedulingState,
+		ScoreProvider: t.ScoreProvider,
 	}
 }
 
@@ -105,11 +103,11 @@ func (t *InternalTelemetry) getTelemetryCycleState(cycleState *framework.CycleSt
 
 func (t *InternalTelemetry) getFeasibleNodesForOppositeDeploymentProvider(
 	feasibleNodesForThisDeployment []*v1.Node,	
-) func() *[]*v1.Node {
+) func() []*v1.Node {
 	// TODO: find a way to reuse some of K8s internal mechanisms to figure this out
 	// for now we assume that the same nodes are feasible for both deployments
-	return func() *[]*v1.Node {
-		return &feasibleNodesForThisDeployment
+	return func() []*v1.Node {
+		return feasibleNodesForThisDeployment
 	}
 }
 
@@ -126,7 +124,7 @@ func (t *InternalTelemetry) PreScore(
 	var scheduledNodes []core.ScheduledNode
 	var queuedPods core.QueuedPods
 	var switchesThatCantBeSources []string
-	var deploymentSchedulingState *core.DeploymentSchedulingState
+	var scoreProvider core.NodeScoreProvider
 
 	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
@@ -138,7 +136,7 @@ func (t *InternalTelemetry) PreScore(
 	if scheduledNodes, queuedPods, err = t.tracker.GetSchedulingState(ctx, intdepl, podsDeplName); err != nil {
 		goto fail
 	}
-	deploymentSchedulingState = t.schedEngine.PrepareForPodScheduling(
+	scoreProvider, _ = t.schedEngine.Prescore(
 		network,
 		intdepl,
 		podsDeplName,
@@ -149,12 +147,11 @@ func (t *InternalTelemetry) PreScore(
 	switchesThatCantBeSources = t.resourceHelper.GetTelemetrySwitchesThatCantBeSources(ctx, intdepl.Namespace)
 	state.Write(TELEMETRY_CYCLE_STATE_KEY, &TelemetryCycleState{
 		Network: network,
-		ScheduledNodes: scheduledNodes,
 		QueuedPods: queuedPods,
 		Intdepl: intdepl,
 		PodsDeploymentName: podsDeplName,
 		TelemetrySwitchesThatCantBeSources: switchesThatCantBeSources,
-		DeploymentSchedulingState: deploymentSchedulingState,
+		ScoreProvider: scoreProvider,
 	})
 	return nil
 fail:
@@ -173,15 +170,7 @@ func (t *InternalTelemetry) Score(
 	if err != nil {
 		return 0, framework.AsStatus(err)
 	}
-	score := t.schedEngine.ComputeNodeSchedulingScore(
-		telemetryState.Network,
-		telemetryState.DeploymentSchedulingState,
-		nodeName,
-		telemetryState.Intdepl,
-		pod,
-		telemetryState.PodsDeploymentName,
-		telemetryState.ScheduledNodes,
-	)
+	score := t.schedEngine.Score(nodeName, telemetryState.ScoreProvider)
 	klog.Infof("Node %s score for pod %s = %d", nodeName, pod.Name, score)
 	return int64(score), nil
 }

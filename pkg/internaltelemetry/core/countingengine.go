@@ -4,6 +4,13 @@ import (
 	"fmt"
 )
 
+type ChildAggregationOption string
+
+const (
+	CHILD_AGGREGATION_SUM ChildAggregationOption = "sum"
+	CHILD_AGGREGATION_MAX ChildAggregationOption = "max"
+)
+
 type reachabilityInfo struct {
 	reaches bool
 	throughAtLeastOneINTswitch bool
@@ -11,30 +18,48 @@ type reachabilityInfo struct {
 
 type MemoKey = string
 
+type childAggregator = func (previousVal int, childVal int) int
+
 // implements H function (and other related) as defined in the thesis
 type CountingEngine struct {
 	network *Network
-	nodesWithOppositeDeployment map[string]struct{}
+	targetNodes map[string]struct{}
 	portState *TelemetryPortState
 
 	HMemo map[MemoKey]int
 	FMemo map[MemoKey]int
 	RMemo map[MemoKey]reachabilityInfo
+	aggregate childAggregator
 }
 
 // arguments are treated as immutable
 func newCountingEngine(
 	network *Network, 
-	nodesWithOppositeDeployment map[string]struct{},
+	targetNodes map[string]struct{},
 	portState *TelemetryPortState,
+	aggOp ChildAggregationOption,
 ) *CountingEngine {
+	aggSum := func(prev int, childVal int) int {
+		return prev + childVal
+	}
+	aggMax := func(prev int, childVal int) int {
+		if childVal > prev {
+			return childVal
+		}
+		return prev
+	}
+	aggregate := aggSum
+	if aggOp == CHILD_AGGREGATION_MAX {
+		aggregate = aggMax
+	}
 	return &CountingEngine{
 		network: network,
-		nodesWithOppositeDeployment: nodesWithOppositeDeployment,
+		targetNodes: targetNodes,
 		portState: portState,
 		HMemo: map[MemoKey]int{},
 		FMemo: map[MemoKey]int{},
 		RMemo: map[MemoKey]reachabilityInfo{},
+		aggregate: aggregate,
 	}
 }
 
@@ -78,8 +103,8 @@ func (e *CountingEngine) getReachability(u *Vertex, v *Vertex) reachabilityInfo 
 	}
 	res := reachabilityInfo{reaches: false, throughAtLeastOneINTswitch: false}
 	if v.IsLeaf() {
-		_, runsOppositeDeployment := e.nodesWithOppositeDeployment[v.Name]
-		res.reaches = runsOppositeDeployment
+		_, isTarget := e.targetNodes[v.Name]
+		res.reaches = isTarget
 	} else {
 		for _, k := range e.children(u, v) {
 			r := e.getReachability(v, k)
@@ -124,9 +149,11 @@ func (e *CountingEngine) F(u *Vertex, v *Vertex) int {
 		res = 0
 	} else {
 		res = e.Q(u, v) * e.R(u, v)
+		childVal := 0
 		for _, k := range e.children(u, v) {
-			res += e.F(v, k) + (e.Q(k, v) * e.R(v, k))
+			childVal = e.aggregate(childVal, e.F(v, k) + (e.Q(k, v) * e.R(v, k)))
 		}
+		res += childVal
 	}
 	e.FMemo[key] = res
 	return res
@@ -141,21 +168,24 @@ func (e *CountingEngine) H(u *Vertex, v *Vertex) int {
 	if v.IsLeaf() {
 		res = 0
 	} else if e.isTelemetrySwitch(v) {
-		someChildReachesOppositePodThroughINTSwitch := false
+		someChildReachesTargetThroughINTSwitch := false
+		childVal := 0
 		for _, k := range e.children(u, v) {
-			res += e.F(v, k)
+			cur := e.F(v, k)
 			r := e.getReachability(v, k)
 			if r.reaches && r.throughAtLeastOneINTswitch {
-				someChildReachesOppositePodThroughINTSwitch = true
-				res += e.Q(k, v)
+				someChildReachesTargetThroughINTSwitch = true
+				cur += e.Q(k, v)
 			}
+			childVal = e.aggregate(childVal, cur)
 		}
-		if someChildReachesOppositePodThroughINTSwitch {
+		res += childVal
+		if someChildReachesTargetThroughINTSwitch {
 			res += e.Q(u, v)
 		}
 	} else {
 		for _, k := range e.children(u, v) {
-			res += e.H(v, k)
+			res = e.aggregate(res, e.H(v, k))
 		}
 	}
 	e.HMemo[key] = res

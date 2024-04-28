@@ -89,3 +89,11 @@ func extractNames(nodes []*v1.Node) []string {
 	}
 	return res
 }
+
+func toNodeNameSet(nodes []*v1.Node) map[string]struct{} {
+	res := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		res[n.Name] = struct{}{}
+	}	
+	return res
+}

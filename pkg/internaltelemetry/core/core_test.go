@@ -413,8 +413,8 @@ func TestScoringEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				provider := func() *[]*v1.Node {return &feasibleNodes}
-				schedState := sched.PrepareForPodScheduling(net, tt.intdepl, depl1, feasibleNodes, provider, tt.scheduledNodes)
+				provider := func() []*v1.Node {return feasibleNodes}
+				_, portState := sched.Prescore(net, tt.intdepl, depl1, feasibleNodes, provider, tt.scheduledNodes)
 
 				shouldBeUsed := func(from string, to string) bool {
 					for _, p := range tt.expectedUsedPorts {
@@ -426,7 +426,7 @@ func TestScoringEngine(t *testing.T) {
 				}
 				for _, v := range net.Vertices {
 					mustHaveNoTelemetryPorts := slices.Index(tt.telemetrySwitches, v.Name) == -1
-					portMeta := schedState.PortMetaOf(v)
+					portMeta := portState.PortMetaOf(v)
 					if mustHaveNoTelemetryPorts {
 						if len(portMeta.AvailableTelemetryPorts) > 0 {
 							t.Errorf("Expected %s to have no availabe ports, but got: %v", v.Name, portMeta.AvailableTelemetryPorts)
@@ -532,6 +532,18 @@ func TestScoringEngine(t *testing.T) {
 				nodesToScore: []string{"w1"},
 				expectedScores: []int{0},
 			},
+			{
+				name: "score for another pod of the same deployment is correctly computed if no pods of the opposite deployment were scheduled",
+				topo: testTopology("v4-tree"),
+				telemetrySwitches: []string{"r1", "r0", "r3"},
+				pod: makePod("p1", depl1),
+				podsDeploymentName: depl1,
+				intdepl: intDepl(4, 3),
+				queuedPods: QueuedPods{PerDeploymentCounts: map[string]int{depl1: 1, depl2: 3}},
+				scheduledNodes: schedule(depl1, "w1", "w4"),
+				nodesToScore: []string{"w1", "w2", "w3", "w4", "w5"},
+				expectedScores: []int{0, 0, 0, 0, 1}, // 1 in w3 and 0 in w5 is equivalent
+			},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -547,13 +559,12 @@ func TestScoringEngine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				provider := func() *[]*v1.Node {return &feasibleNodes}
-				deplSchedulingState := sched.PrepareForPodScheduling(net, tt.intdepl, tt.podsDeploymentName,
+				provider := func() []*v1.Node {return feasibleNodes}
+				scoreProvider, _ := sched.Prescore(net, tt.intdepl, tt.podsDeploymentName,
 					feasibleNodes, provider, tt.scheduledNodes)
 				for i := range tt.nodesToScore {
 					nodeName := tt.nodesToScore[i]
-					score := sched.ComputeNodeSchedulingScore(net, deplSchedulingState, nodeName, tt.intdepl,
-						tt.pod, tt.podsDeploymentName, tt.scheduledNodes)
+					score := sched.Score(nodeName, scoreProvider)
 					if score != tt.expectedScores[i] {
 						t.Errorf("Invalid score for node %s, expected %d got %d", nodeName, tt.expectedScores[i], score)
 					}
