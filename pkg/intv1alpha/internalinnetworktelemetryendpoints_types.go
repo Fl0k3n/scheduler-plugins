@@ -44,6 +44,7 @@ type InternalInNetworkTelemetryEndpointsSpec struct {
 	// Foo is an example field of InternalInNetworkTelemetryEndpoints. Edit internalinnetworktelemetryendpoints_types.go to remove/update
 	DeploymentEndpoints []DeploymentEndpoints `json:"deploymentEndpoints"`
 	CollectorRef v1.LocalObjectReference `json:"collectorRef"`
+	CollectionId string `json:"collectionId"`
 }
 
 // InternalInNetworkTelemetryEndpointsStatus defines the observed state of InternalInNetworkTelemetryEndpoints

@@ -28,6 +28,8 @@ import (
 type CollectorSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	ReportingContainerPort int32 `json:"reportingContainerPort"`
+	ApiContainerPort int32 `json:"apiContainerPort"`
 	PodSpec v1.PodSpec `json:"podSpec"`
 }
 
@@ -48,7 +50,8 @@ type CollectorStatus struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=status
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 	NodeRef *v1.LocalObjectReference `json:"nodeRef,omitempty"`
-	Port *int32 `json:"port,omitempty"`
+	ReportingPort *int32 `json:"reportingPort,omitempty"`
+	ApiServiceRef *v1.LocalObjectReference `json:"apiServiceRef,omitempty"`
 }
 
 //+kubebuilder:object:root=true

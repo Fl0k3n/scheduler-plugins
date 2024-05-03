@@ -3,6 +3,9 @@ package internaltelemetry
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"runtime/pprof"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -51,6 +54,7 @@ type InternalTelemetry struct {
 	tracker *core.TelemetrySchedulingTracker
 	deplMgr *core.DeploymentManager
 	resourceHelper *core.ResourceHelper
+	profilingStarted bool
 }
 
 var _ framework.PreScorePlugin = &InternalTelemetry{}
@@ -84,6 +88,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 		tracker: tracker,
 		deplMgr: deplMgr,
 		resourceHelper: resourceHelper,
+		profilingStarted: true, // TODO
 	}, nil
 }
 
@@ -111,6 +116,27 @@ func (t *InternalTelemetry) getFeasibleNodesForOppositeDeploymentProvider(
 	}
 }
 
+func (t *InternalTelemetry) maybeStartProfiling() {
+	if t.profilingStarted {
+		return
+	}
+	f, err := os.Create("/cpu.prof")
+	if err != nil {
+		fmt.Println("Failed to create profiling file")
+		return
+	}
+	err = pprof.StartCPUProfile(f)
+	if err != nil {
+		fmt.Println("could not start profiling")
+		return
+	}
+	t.profilingStarted = true
+}
+
+func (t *InternalTelemetry) maybeStopProfiling() {
+	pprof.StopCPUProfile()
+}
+
 func (t *InternalTelemetry) PreScore(
 	ctx context.Context,
 	state *framework.CycleState,
@@ -125,6 +151,8 @@ func (t *InternalTelemetry) PreScore(
 	var queuedPods core.QueuedPods
 	var switchesThatCantBeSources []string
 	var scoreProvider core.NodeScoreProvider
+
+	t.maybeStartProfiling()
 
 	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
@@ -204,6 +232,7 @@ func (t *InternalTelemetry) NormalizeScore(
 			scores[node].Score = int64(newScore)
 		}
 	}
+	t.maybeStopProfiling()
 	return nil
 }
 
@@ -251,5 +280,4 @@ func (t *InternalTelemetry) PostBind(
 		return
 	}
 	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
-	// TODO: check if this was the last pod and cleanup
 }

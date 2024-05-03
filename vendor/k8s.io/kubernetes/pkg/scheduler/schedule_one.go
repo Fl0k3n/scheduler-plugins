@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -63,10 +65,31 @@ const (
 	numberOfHighestScoredNodesToReport = 3
 )
 
+var profilingCounter = 0
+
+func (t *Scheduler) maybeStartProfiling() {
+	f, err := os.Create(fmt.Sprintf("/profiling/cpu%d.prof", profilingCounter))
+	profilingCounter++
+	if err != nil {
+		fmt.Println("Failed to create profiling file")
+		return
+	}
+	err = pprof.StartCPUProfile(f)
+	if err != nil {
+		fmt.Println("could not start profiling")
+		return
+	}
+}
+
+func (t *Scheduler) maybeStopProfiling() {
+	pprof.StopCPUProfile()
+}
+
 // scheduleOne does the entire scheduling workflow for a single pod. It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	logger := klog.FromContext(ctx)
 	podInfo, err := sched.NextPod()
+	// sched.maybeStartProfiling()
 	if err != nil {
 		logger.Error(err, "Error while retrieving next pod from scheduling queue")
 		return
@@ -109,6 +132,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		sched.FailureHandler(schedulingCycleCtx, fwk, assumedPodInfo, status, scheduleResult.nominatingInfo, start)
 		return
 	}
+	// sched.maybeStopProfiling()
 
 	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
 	go func() {

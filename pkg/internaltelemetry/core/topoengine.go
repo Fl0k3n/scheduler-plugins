@@ -82,6 +82,7 @@ func (t *TopologyEngine) loadIncSwitches(ctx context.Context) (telemetryEnabledS
 	}
 	telemetryEnabledSwitches = make(map[string]*shimv1alpha.IncSwitch)
 	programs := map[string]*shimv1alpha.P4Program{}
+	// TODO parallelize
 	for _, incswitch := range incSwitchesMap {
 		programName := incswitch.Spec.ProgramName
 		if programName == "" {

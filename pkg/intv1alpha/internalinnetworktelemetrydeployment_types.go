@@ -37,6 +37,7 @@ type InternalInNetworkTelemetryDeploymentSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 	DeploymentTemplates []NamedDeploymentSpec `json:"deployments"`
 	CollectorRef v1.LocalObjectReference `json:"collectorRef"`
+	CollectionId string `json:"collectionId"`
 }
 
 // InternalInNetworkTelemetryDeploymentStatus defines the observed state of InternalInNetworkTelemetryDeployment
