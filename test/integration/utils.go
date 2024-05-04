@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -233,9 +234,38 @@ func cleanupPods(t *testing.T, testCtx *testContext, pods []*v1.Pod) {
 	}
 }
 
+func cleanupDeployments(t *testing.T, testCtx *testContext, deployments []*appsv1.Deployment) {
+	var zero int64 = 0
+
+	for _, d := range deployments {
+		err := testCtx.ClientSet.AppsV1().Deployments(d.Namespace).Delete(testCtx.Ctx, d.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: &zero,
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("error while deleting deployment %s/%s: %v", d.Namespace, d.Name, err)
+		}
+	}
+	for _, d := range deployments {
+		if err := wait.Poll(time.Millisecond, wait.ForeverTestTimeout,
+			deploymentDeleted(testCtx.ClientSet, d.Namespace, d.Name)); err != nil {
+			t.Errorf("error while waiting for pod  %s/%s to get deleted: %v", d.Namespace, d.Name, err)
+		}
+	}
+}
+
 func podDeleted(c clientset.Interface, podNamespace, podName string) wait.ConditionFunc {
 	return func() (bool, error) {
 		_, err := c.CoreV1().Pods(podNamespace).Get(context.TODO(), podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, nil
+	}
+}
+
+func deploymentDeleted(c clientset.Interface, deploymentNamespace, deploymentName string) wait.ConditionFunc {
+	return func() (bool, error) {
+		_, err := c.AppsV1().Deployments(deploymentNamespace).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}

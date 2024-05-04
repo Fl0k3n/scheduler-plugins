@@ -1,8 +1,6 @@
 package core
 
 import (
-	"fmt"
-
 	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 )
@@ -14,13 +12,13 @@ type TelemetryPortMarker struct {
 
 func newTelemetryPortMarker() *TelemetryPortMarker {
 	return &TelemetryPortMarker{
-		traversedWithPreviousINTMemo: map[string]reachabilityInfo{},
-		traversedWithoutPreviousINTMemo: map[string]reachabilityInfo{},
+		traversedWithPreviousINTMemo: map[MemoKey]reachabilityInfo{},
+		traversedWithoutPreviousINTMemo: map[MemoKey]reachabilityInfo{},
 	}
 }
 
 func (t *TelemetryPortMarker) memoKey(u *Vertex, v *Vertex) MemoKey {
-	return fmt.Sprintf("%s->%s", u.Name, v.Name)
+	return MemoKey{src: u.Ordinal, dst: v.Ordinal}
 }
 
 func (t *TelemetryPortMarker) GetInitialPortState(network *Network) *TelemetryPortState {

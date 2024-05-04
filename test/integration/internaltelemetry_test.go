@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -28,11 +29,180 @@ import (
 	"sigs.k8s.io/scheduler-plugins/test/util"
 )
 
+const NS = "default"
 
-func TestStuff(t *testing.T) {
-	testCtx := &testContext{}
-	testCtx.Ctx, testCtx.CancelFn = context.WithCancel(context.Background())
+func TestScheduler(t *testing.T) {
+	retries := 5
+	measurer := newMeasurementHelper(t, "trees_both_scheds")
+	measurer.Init()
+	defer measurer.Close()
 
+	tests := []struct {
+		name    		string
+		numPods1		int
+		numPods2		int
+		clusterBuilder	func () *cluster
+	}{
+		{
+			name: "v0",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(4, 8, 1, 2, 0.4)},
+		},
+		{
+			name: "v1",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(8, 16, 1, 2, 0.4)},
+		},
+		{
+			name: "v3",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(8, 32, 4, 2, 0.4)},
+		},
+		{
+			name: "v5",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(8, 128, 4, 2, 0.4)},
+		},
+		{
+			name: "v6",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(16, 128, 4, 2, 0.4)},
+		},
+		{
+			name: "v7",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(16, 128, 8, 16, 0.4)},
+		},
+		{
+			name: "v8",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(8, 512, 8, 8, 0.4)},
+		},
+		{
+			name: "v10",
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func() *cluster {return makeCluster(32, 256, 8, 8, 0.4)},
+		},
+	}
+	evalSchedVariant := []bool{false, true}
+	for _, evaluatingTelemerySched := range evalSchedVariant {
+		for _, tt := range tests {
+			t.Log(tt.name)
+			baseCluster := tt.clusterBuilder()
+			// _ = baseCluster
+			for i := 0; i < retries; i++ {
+				t.Run(tt.name, func(t *testing.T) {
+					testCtx := &testContext{}
+					testCtx.Ctx, testCtx.CancelFn = context.WithCancel(context.Background())
+					client := initSchemeAndResources(t, testCtx)
+					testCtx = initScheduler(t, evaluatingTelemerySched, testCtx, tt.numPods1 + tt.numPods2)
+					syncInformerFactory(testCtx)
+					go testCtx.Scheduler.Run(testCtx.Ctx)
+					defer cleanupTest(t, testCtx)
+
+					cluster := baseCluster.DeepCopy()
+					// cluster := tt.clusterBuilder()
+					for _, node := range cluster.nodes {
+						_, err := testCtx.ClientSet.CoreV1().Nodes().Create(testCtx.Ctx, node, metav1.CreateOptions{})
+						if err != nil {
+							t.Fatalf("Failed to create Node %q: %v", node.Name, err)
+						}
+					}
+					if err := createSdnClusterResources(testCtx.Ctx, client, cluster); err != nil {
+						t.Fatalf("Failed to create cluster resources: %v", err)
+					}
+					defer cleanupSdnShim(t, testCtx, cluster, client)
+					d1PodTemplate := makeIntDeplPod("_", "_", "_").Spec
+					d2PodTemplate := makeIntDeplPod("_", "_", "_").Spec
+					depl1 := makeDeployment("depl1", "intdepl", tt.numPods1, d1PodTemplate)
+					depl2 := makeDeployment("depl2", "intdepl", tt.numPods2, d2PodTemplate)
+					intdepl := makeInternalTelemetryDeployment("intdepl", depl1, depl2)
+					if err := createIntDeplResources(testCtx.Ctx, client, intdepl, depl1, depl2); err != nil {
+						t.Fatalf("Failed to create telemetry resources: %v", err)
+					}
+					defer cleanupDeployments(t, testCtx, []*appsv1.Deployment{depl1, depl2})
+					defer cleanupIntdepl(t, testCtx, client, intdepl)
+
+					// setupTimeProfiling("third")
+					measurer.StartMeasurement(cluster, tt.numPods1 + tt.numPods2, evaluatingTelemerySched)
+					pods := []*v1.Pod{}
+					remaningToBeScheduled := map[string]struct{}{}
+					for i := 0; i < int(*depl1.Spec.Replicas) + int(*depl2.Spec.Replicas); i++ {
+						var p *v1.Pod
+						if i % 2 == 0 {
+							p = makePodForDeployment(fmt.Sprintf("%s-%d", depl1.Name, i / 2), depl1)
+						} else {
+							p = makePodForDeployment(fmt.Sprintf("%s-%d", depl2.Name, i / 2), depl2)
+						}
+						if err := client.Create(testCtx.Ctx, p); err != nil {
+							t.Fatalf("Failed to create pod: %v", err)
+						}
+						pods = append(pods, p)
+						remaningToBeScheduled[p.Name] = struct{}{}
+					}
+					defer cleanupPods(t, testCtx, pods)
+
+					_, stillOpen := <- internaltelemetry.DoneChan
+					if stillOpen {
+						t.Fatalf("expected doneChan to be closed")
+					}
+					measurer.StopMeasurement()
+
+					// stopTimeProfiling()
+					for podName := range remaningToBeScheduled {
+						if !podScheduled(testCtx.ClientSet, NS, podName) {
+							t.Error("expected all pods to be scheduled")
+						} 	
+					}
+				})
+			}
+		}
+	}
+}
+
+func initScheduler(t *testing.T, telemetry bool, testCtx *testContext, numPodsToSchedule int) *testContext {
+	cfg, err := util.NewDefaultSchedulerComponentConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	internaltelemetry.DoneChan = make(chan struct{})
+	if telemetry {
+		internaltelemetry.IsEvaluatingDefaultScheduler = false
+		cfg.Profiles[0].Plugins.PreScore = schedapi.PluginSet{
+			Enabled:  []schedapi.Plugin{{Name: internaltelemetry.Name}},
+			Disabled: []schedapi.Plugin{{Name: "*"}},
+		}
+		cfg.Profiles[0].Plugins.Score = schedapi.PluginSet{
+			Enabled:  []schedapi.Plugin{{Name: internaltelemetry.Name}},
+			Disabled: []schedapi.Plugin{{Name: "*"}},
+		}
+		cfg.Profiles[0].Plugins.Reserve.Enabled = append(cfg.Profiles[0].Plugins.Reserve.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
+		cfg.Profiles[0].Plugins.PostBind.Enabled = append(cfg.Profiles[0].Plugins.PostBind.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
+	} else {
+		// a hack to get it record finished scheduling in the same way as internal telemetry
+		internaltelemetry.IsEvaluatingDefaultScheduler = true
+		internaltelemetry.ScheduledPods = 0
+		internaltelemetry.PodsToSchedule = numPodsToSchedule
+		cfg.Profiles[0].Plugins.PostBind.Enabled = append(cfg.Profiles[0].Plugins.PostBind.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
+	}
+	testCtx = initTestSchedulerWithOptions(
+		t,
+		testCtx,
+		scheduler.WithProfiles(cfg.Profiles...),
+		scheduler.WithFrameworkOutOfTreeRegistry(fwkruntime.Registry{internaltelemetry.Name: internaltelemetry.New}),
+	)
+	return testCtx
+}
+
+func initSchemeAndResources(t *testing.T, testCtx *testContext) client.Client {
 	cs := clientset.NewForConfigOrDie(globalKubeConfig)
 
 	scheme := runtime.NewScheme()
@@ -46,7 +216,7 @@ func TestStuff(t *testing.T) {
 	testCtx.ClientSet = cs
 	testCtx.KubeConfig = globalKubeConfig
 
-	if err := wait.Poll(200*time.Millisecond, 3*time.Second, func() (done bool, err error) {
+	if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (done bool, err error) {
 		groupList, _, err := cs.ServerGroupsAndResources()
 		if err != nil {
 			return false, nil
@@ -61,59 +231,76 @@ func TestStuff(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Timed out waiting for CRD to be ready: %v", err)
 	}
+	return client
+}
 
-	cfg, err := util.NewDefaultSchedulerComponentConfig()
-	if err != nil {
-		t.Fatal(err)
+func cleanupIntdepl(
+	t *testing.T,
+	testCtx *testContext,
+	c client.Client,
+	intdepl *intv1alpha.InternalInNetworkTelemetryDeployment,
+) {
+	if err := c.Delete(testCtx.Ctx, intdepl); err != nil {
+		t.Fatalf("Failed to cleanup intdepl: %v", err)
 	}
-	cfg.Profiles[0].Plugins.PreScore.Enabled = append(cfg.Profiles[0].Plugins.PreScore.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
-	cfg.Profiles[0].Plugins.Score = schedapi.PluginSet{
-		Enabled:  []schedapi.Plugin{{Name: internaltelemetry.Name}},
-		Disabled: []schedapi.Plugin{{Name: "*"}},
+	if err := wait.Poll(time.Millisecond, wait.ForeverTestTimeout,
+		func() (done bool, err error) {
+			idepl := &intv1alpha.InternalInNetworkTelemetryDeployment{}
+			if err := c.Get(testCtx.Ctx, client.ObjectKeyFromObject(intdepl), idepl); err != nil {
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				return false, err
+			}
+			return false, nil
+		}); err != nil {
+		t.Errorf("error while waiting for intdepl  %s/%s to get deleted: %v", intdepl.Namespace, intdepl.Name, err)
 	}
-	cfg.Profiles[0].Plugins.Reserve.Enabled = append(cfg.Profiles[0].Plugins.Reserve.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
-	cfg.Profiles[0].Plugins.PostBind.Enabled = append(cfg.Profiles[0].Plugins.PostBind.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
+}
 
-
-	testCtx = initTestSchedulerWithOptions(
-		t,
-		testCtx,
-		scheduler.WithProfiles(cfg.Profiles...),
-		scheduler.WithFrameworkOutOfTreeRegistry(fwkruntime.Registry{internaltelemetry.Name: internaltelemetry.New}),
-	)
-
-	syncInformerFactory(testCtx)
-	go testCtx.Scheduler.Run(testCtx.Ctx)
-	t.Log("Init scheduler success")
-	defer cleanupTest(t, testCtx)
-
-	cluster := makeCluster(2, 4, 1, 2, 0.4)
-	for _, node := range cluster.nodes {
-		_, err := cs.CoreV1().Nodes().Create(testCtx.Ctx, node, metav1.CreateOptions{})
-		if err != nil {
-			t.Fatalf("Failed to create Node %q: %v", node.Name, err)
+func cleanupSdnShim(t *testing.T, testCtx *testContext, cluster *cluster, c client.Client) {
+	if err := c.Delete(testCtx.Ctx, cluster.topology); err != nil {
+		t.Fatalf("Failed to cleanup topology: %v", err)
+	}
+	for _, program := range cluster.programs {
+		if err := c.Delete(testCtx.Ctx, program); err != nil {
+			t.Fatalf("Failed to cleanup p4program resource: %v", err)
 		}
 	}
-	
-	if err := createSdnClusterResources(testCtx.Ctx, client, cluster); err != nil {
-		t.Fatalf("Failed to create cluster resources: %v", err)
+	for _, incSwitch := range cluster.incSwitches {
+		if err := c.Delete(testCtx.Ctx, incSwitch); err != nil {
+			t.Fatalf("Failed to cleanup incswtich resource: %v", err)
+		}
 	}
-
-	depl1 := makeDeployment("depl1", "intdepl", 1)
-	depl2 := makeDeployment("depl2", "intdepl", 1)
-	intdepl := makeInternalTelemetryDeployment("intdepl", depl1, depl2)
-	p1 := makeIntDeplPod("p1", "intdepl", "depl1")
-	if err := createIntDeplResources(testCtx.Ctx, client, intdepl, depl1, depl2); err != nil {
-		t.Fatalf("Failed to create telemetry resources: %v", err)
+	for _, program := range cluster.programs{
+		if err := wait.Poll(time.Millisecond, wait.ForeverTestTimeout,
+			func() (done bool, err error) {
+				prog := &shimv1alpha.P4Program{}
+				if err := c.Get(testCtx.Ctx, client.ObjectKeyFromObject(program), prog); err != nil {
+					if apierrors.IsNotFound(err) {
+						return true, nil
+					}
+					return false, err
+				}
+				return false, nil
+			}); err != nil {
+			t.Errorf("error while waiting for program  %s/%s to get deleted: %v", program.Namespace, program.Name, err)
+		}
 	}
-	if err := client.Create(testCtx.Ctx, p1); err != nil {
-		t.Fatalf("Failed to create pod: %v", err)
-	}
-	if err := wait.Poll(1*time.Second, 20*time.Second, func() (bool, error) {
-		return podScheduled(cs, "", p1.Name), nil
-
-	}); err != nil {
-		t.Errorf("wanted pod %q to be scheduled, error: %v", p1.Name, err)
+	for _, incSwitch := range cluster.incSwitches {
+		if err := wait.Poll(time.Millisecond, wait.ForeverTestTimeout,
+			func() (done bool, err error) {
+				isw := &shimv1alpha.IncSwitch{}
+				if err := c.Get(testCtx.Ctx, client.ObjectKeyFromObject(incSwitch), isw); err != nil {
+					if apierrors.IsNotFound(err) {
+						return true, nil
+					}
+					return false, err
+				}
+				return false, nil
+			}); err != nil {
+			t.Errorf("error while waiting for incswitch  %s/%s to get deleted: %v", incSwitch.Namespace, incSwitch.Name, err)
+		}
 	}
 }
 
@@ -172,13 +359,6 @@ func createSdnClusterResources(ctx context.Context, c client.Client, cluster *cl
 	return err
 }
 
-type cluster struct {
-	nodes []*v1.Node
-	incSwitches []*shimv1alpha.IncSwitch
-	topology *shimv1alpha.Topology
-	programs []*shimv1alpha.P4Program
-}
-
 func makeCluster(
 	numRackNodes int,
 	numRacks int,
@@ -191,6 +371,11 @@ func makeCluster(
 	intProgram := makeTelemetryProgram(telemetryProgramName)
 	
 	c := &cluster{
+		numRackNodes: numRackNodes,
+		numRacks: numRacks,
+		numFakeRackExtenders: numFakeRackExtenders,
+		numl0ToL1Connections: numl0ToL1Connections,
+		telemetrySwitchFraction: telemetrySwitchFraction,
 		nodes: []*v1.Node{},
 		incSwitches: []*shimv1alpha.IncSwitch{},
 		topology: nil,
@@ -275,6 +460,8 @@ func makeCluster(
 		lvl++
 	}
 	c.topology = makeTestTopology(vertices, edges)
+	c.totalVertices = len(vertices)
+	c.totalEdges = len(edges)
 	return c
 }
 
@@ -294,17 +481,18 @@ func makeNetDevice(
 }
 
 func makeNode(name string) *v1.Node {
-	return st.MakeNode().Name(name).Obj()
-}
-
-type edge struct {
-	u string 
-	v string
-}
-
-type vertex struct {
-	name string
-	deviceType shimv1alpha.DeviceType
+	node := st.MakeNode().Name(name).Obj()
+	node.Status.Allocatable = v1.ResourceList{
+		v1.ResourcePods:   *resource.NewQuantity(32, resource.DecimalSI),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+		v1.ResourceCPU:    *resource.NewQuantity(12, resource.DecimalSI),
+	}
+	node.Status.Capacity = v1.ResourceList{
+		v1.ResourcePods:   *resource.NewQuantity(32, resource.DecimalSI),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+		v1.ResourceCPU:    *resource.NewQuantity(12, resource.DecimalSI),
+	}
+	return node
 }
 
 func makeTestTopology(vertices []vertex, edges []edge) *shimv1alpha.Topology {
@@ -335,6 +523,7 @@ func makeTestTopology(vertices []vertex, edges []edge) *shimv1alpha.Topology {
 	}
 	return &shimv1alpha.Topology{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace: NS,
 			Name: "test",
 		},
 		Spec: shimv1alpha.TopologySpec{
@@ -346,6 +535,7 @@ func makeTestTopology(vertices []vertex, edges []edge) *shimv1alpha.Topology {
 func makeIncSwitch(name string, programName string) *shimv1alpha.IncSwitch {
 	return &shimv1alpha.IncSwitch{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace: NS,
 			Name: name,
 		},
 		Spec: shimv1alpha.IncSwitchSpec{
@@ -358,6 +548,7 @@ func makeIncSwitch(name string, programName string) *shimv1alpha.IncSwitch {
 func makeTelemetryProgram(name string) *shimv1alpha.P4Program {
 	return &shimv1alpha.P4Program{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace: NS,
 			Name: name,
 		},
 		Spec: shimv1alpha.P4ProgramSpec{
@@ -376,6 +567,7 @@ func makeInternalTelemetryDeployment(
 ) *intv1alpha.InternalInNetworkTelemetryDeployment {
 	return &intv1alpha.InternalInNetworkTelemetryDeployment{
 		ObjectMeta: metav1.ObjectMeta{
+			Namespace: NS,
 			Name: name,
 		},
 		Spec: intv1alpha.InternalInNetworkTelemetryDeploymentSpec{
@@ -412,22 +604,35 @@ func makeIntDeplPod(
 	intdeplName string,
 	deplName string,
 ) *v1.Pod {
-	return st.MakePod().Name(name).Namespace("").
+	return st.MakePod().Name(name).Namespace(NS).
 			Labels(intPodLabels(intdeplName, deplName)).
-			SchedulerName(internaltelemetry.Name).
+			Containers(makePodContainers()).
 			Obj()
+}
+
+func makePodForDeployment(name string, depl *appsv1.Deployment) *v1.Pod {
+	return &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Namespace: depl.Namespace,
+			Labels: depl.Spec.Template.Labels,
+		},
+		Spec: depl.Spec.Template.Spec,
+	}
 }
 
 func makeDeployment(
 	name string,
 	intdeplName string,
 	replicas int,
+	podSpec v1.PodSpec,
 ) *appsv1.Deployment {
 	labels := intPodLabels(intdeplName, name)
 	replicas32 := int32(replicas)
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
+			Namespace: NS,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -435,8 +640,28 @@ func makeDeployment(
 			},
 			Replicas: &replicas32,
 			Template: v1.PodTemplateSpec{
-				Spec: st.MakePod().Spec,
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: podSpec,
 			},
 		},
 	}	
+}
+
+func makePodContainers() []v1.Container {
+	resources := v1.ResourceList{
+		v1.ResourceCPU: resource.MustParse("500m"),
+		v1.ResourceMemory: resource.MustParse("128Mi"),
+	}
+	return []v1.Container{
+		{
+			Name: "c1",
+			Image: "fake",
+			Resources: v1.ResourceRequirements{
+				Limits: resources,
+				Requests: resources,
+			},
+		},
+	}
 }

@@ -56,7 +56,7 @@ func newQueuedPods() QueuedPods {
 	}
 }
 
-func (q *QueuedPods) AllQueued() bool {
+func (q *QueuedPods) Empty() bool {
 	for _, count := range q.PerDeploymentCounts {
 		if count > 0 {
 			return false

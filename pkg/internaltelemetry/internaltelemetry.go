@@ -3,9 +3,6 @@ package internaltelemetry
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"runtime/pprof"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -24,6 +21,13 @@ const (
 	INTERNAL_TELEMETRY_POD_DEPLOYMENT_NAME_LABEL = "inc.kntp.com/part-of-deployment"
 	TELEMETRY_CYCLE_STATE_KEY = Name
 )
+
+
+// TODO this is for evaluation purposes and should be deleted
+var DoneChan = make(chan struct{})
+var PodsToSchedule = 0
+var ScheduledPods = 0
+var IsEvaluatingDefaultScheduler = false
 
 type TelemetryCycleState struct {
 	Network *core.Network
@@ -54,7 +58,6 @@ type InternalTelemetry struct {
 	tracker *core.TelemetrySchedulingTracker
 	deplMgr *core.DeploymentManager
 	resourceHelper *core.ResourceHelper
-	profilingStarted bool
 }
 
 var _ framework.PreScorePlugin = &InternalTelemetry{}
@@ -88,7 +91,6 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 		tracker: tracker,
 		deplMgr: deplMgr,
 		resourceHelper: resourceHelper,
-		profilingStarted: true, // TODO
 	}, nil
 }
 
@@ -116,27 +118,6 @@ func (t *InternalTelemetry) getFeasibleNodesForOppositeDeploymentProvider(
 	}
 }
 
-func (t *InternalTelemetry) maybeStartProfiling() {
-	if t.profilingStarted {
-		return
-	}
-	f, err := os.Create("/cpu.prof")
-	if err != nil {
-		fmt.Println("Failed to create profiling file")
-		return
-	}
-	err = pprof.StartCPUProfile(f)
-	if err != nil {
-		fmt.Println("could not start profiling")
-		return
-	}
-	t.profilingStarted = true
-}
-
-func (t *InternalTelemetry) maybeStopProfiling() {
-	pprof.StopCPUProfile()
-}
-
 func (t *InternalTelemetry) PreScore(
 	ctx context.Context,
 	state *framework.CycleState,
@@ -151,8 +132,6 @@ func (t *InternalTelemetry) PreScore(
 	var queuedPods core.QueuedPods
 	var switchesThatCantBeSources []string
 	var scoreProvider core.NodeScoreProvider
-
-	t.maybeStartProfiling()
 
 	if network, err = t.topoEngine.PrepareForPodScheduling(ctx, pod); err != nil {
 		goto fail
@@ -232,7 +211,6 @@ func (t *InternalTelemetry) NormalizeScore(
 			scores[node].Score = int64(newScore)
 		}
 	}
-	t.maybeStopProfiling()
 	return nil
 }
 
@@ -274,10 +252,22 @@ func (t *InternalTelemetry) PostBind(
 	p *v1.Pod,
 	nodeName string,
 ) {
+	// TODO this is for evaluation purposes and should be deleted
+	if IsEvaluatingDefaultScheduler {
+		ScheduledPods++
+		if ScheduledPods == PodsToSchedule {
+			close(DoneChan)
+		}
+		return
+	}
 	ts, err := t.getTelemetryCycleState(state)
 	if err != nil {
 		klog.Errorf("failed to unreserve pod because telemetry cycle state wasn't found: %e", err)
 		return
 	}
 	t.tracker.RemoveSchedulingReservation(ts.Intdepl, p.Name)	
+	// TODO this is for evaluation purposes and should be deleted
+	if ts.QueuedPods.Empty() {
+		close(DoneChan)
+	}
 }

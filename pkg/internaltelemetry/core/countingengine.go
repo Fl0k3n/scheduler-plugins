@@ -16,7 +16,10 @@ type reachabilityInfo struct {
 	throughAtLeastOneINTswitch bool
 }
 
-type MemoKey = string
+type MemoKey struct {
+	src int
+	dst int
+}
 
 type childAggregator = func (previousVal int, childVal int) int
 
@@ -64,7 +67,7 @@ func newCountingEngine(
 }
 
 func (e *CountingEngine) memoKey(u *Vertex, v *Vertex) MemoKey {
-	return fmt.Sprintf("%s->%s", u.Name, v.Name)
+	return MemoKey{src: u.Ordinal, dst: v.Ordinal}
 }
 
 func (e *CountingEngine) isTelemetrySwitch(v *Vertex) bool {

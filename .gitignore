@@ -18,3 +18,5 @@ hack/tools/bin/*
 *.sublime-project
 *.sublime-workspace
 *~
+hack/default.etcd
+third_party

@@ -32,7 +32,8 @@ const (
 	EnvAssetOverridePrefix = "TEST_ASSET_"
 	// AssetsDefaultPath is the default location to look for test binaries in,
 	// if no override was provided.
-	AssetsDefaultPath = "/usr/local/kubebuilder/bin"
+	// AssetsDefaultPath = "/usr/local/kubebuilder/bin"
+	AssetsDefaultPath = "/home/flok3n/.local/share/kubebuilder-envtest/k8s/1.28.3-linux-amd64"
 )
 
 // BinPathFinder finds the path to the given named binary, using the following locations
@@ -49,6 +50,7 @@ func BinPathFinder(symbolicName, assetDirectory string) (binPath string) {
 	leadingNumberPattern := regexp.MustCompile("^[0-9]+")
 	sanitizedName = leadingNumberPattern.ReplaceAllString(sanitizedName, "")
 	envVar := EnvAssetOverridePrefix + sanitizedName
+	
 
 	// TEST_ASSET_XYZ
 	if val, ok := os.LookupEnv(envVar); ok {

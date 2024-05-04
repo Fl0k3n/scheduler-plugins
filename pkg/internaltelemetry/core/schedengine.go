@@ -1,9 +1,18 @@
 package core
 
 import (
+	"fmt"
+	"os"
+	goruntime "runtime"
+	"runtime/pprof"
+
 	v1 "k8s.io/api/core/v1"
 	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
 )
+
+
+var TakeMemorySnapshot bool = false
+var MemorySnapshotFilePath string = ""
 
 // thread-safe with respect to scheduling framework semantics
 type TelemetrySchedulingEngine struct {
@@ -15,6 +24,16 @@ func NewTelemetrySchedulingEngine() *TelemetrySchedulingEngine {
 	return &TelemetrySchedulingEngine{
 		// deploymentSchedulingCache: sync.Map{}, // let's not complicate for now
 	}
+}
+
+func takeMemorySnapshot() {
+	f, err := os.Create(MemorySnapshotFilePath)
+	if err != nil {
+		fmt.Printf("Failed to create file for memory snapshot: %v", err)
+	}
+	goruntime.GC()
+	pprof.WriteHeapProfile(f)
+	f.Close()
 }
 
 func (t *TelemetrySchedulingEngine) Prescore(
@@ -35,6 +54,10 @@ func (t *TelemetrySchedulingEngine) Prescore(
 		portMarker.FillInitialPortState(network, portState, previouslyScheduledNodes, intdepl)
 		countingEngine := newCountingEngine(network, nodesWithOppositeDeployment, portState, CHILD_AGGREGATION_SUM)
 		countingEngine.Precompute(extractNames(feasibleNodes))
+		if TakeMemorySnapshot {
+			takeMemorySnapshot()
+			TakeMemorySnapshot = false
+		}
 		scoreProvider = func(nodeName string) int {
 			return countingEngine.GetNumberOfNewINTPortsCoverableBySchedulingOn(network.Vertices[nodeName])
 		}
