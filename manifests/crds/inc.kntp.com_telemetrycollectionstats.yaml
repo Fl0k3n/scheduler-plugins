@@ -62,6 +62,9 @@ spec:
             properties:
               summary:
                 properties:
+                  createdAt:
+                    format: int64
+                    type: integer
                   timeWindowsSeconds:
                     type: integer
                   totalReports:
@@ -115,6 +118,7 @@ spec:
                     - onePercentileSlowestPathLatencyMicroS
                     type: object
                 required:
+                - createdAt
                 - timeWindowsSeconds
                 - totalReports
                 - windowMetrics

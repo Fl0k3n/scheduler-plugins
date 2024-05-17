@@ -15,27 +15,48 @@ import (
 const (
 	RESULTS_DIR = "/home/flok3n/develop/k8s_inc_analysis/data"
 )
+type SchedulerType string 
+
+const (
+	SCHED_DEFAULT 		   SchedulerType = "default"
+	SCHED_NETWORK_OVERHEAD SchedulerType = "network-overhead"
+	SCHED_TELEMETRY    	   SchedulerType = "telemetry"
+)
+
+type ClusterType string 
+
+const (
+	TREE ClusterType = "tree"
+	FAT_TREE ClusterType = "fat-tree"
+)
 
 type scheduligTimeMeasurement struct {
 	cluster *cluster
 	numPods int
 	startTime time.Time
 	stopTime time.Time
-	telemetry bool
+	schedType SchedulerType
 }
 
-func (s scheduligTimeMeasurement) CsvHeader() string {
-	return "sched_type,cluster_key,num_nodes,num_inc_switches,num_graph_vertices,num_graph_edges,num_pods,total_scheduling_time_ms\n"
+func (s scheduligTimeMeasurement) CsvHeader(clusterType ClusterType) string {
+	if clusterType == TREE {
+		return "sched_type,cluster_key,num_nodes,num_inc_switches,num_graph_vertices,num_graph_edges,num_pods,total_scheduling_time_ms\n"
+	}
+	return "sched_type,cluster_key,k,num_nodes,num_inc_switches,num_graph_vertices,num_graph_edges,num_pods,total_scheduling_time_ms\n"
 }
 
 func (s scheduligTimeMeasurement) Csv() string {
-	schedType := "default"
-	if s.telemetry {
-		schedType = "telemetry"
+	if s.cluster.T == TREE {
+		return fmt.Sprintf("%s,%s,%d,%d,%d,%d,%d,%d\n",
+			string(s.schedType), makeClusterDescriptor(s.cluster), len(s.cluster.nodes), len(s.cluster.incSwitches),
+			s.cluster.totalVertices, s.cluster.totalEdges, s.numPods, s.stopTime.Sub(s.startTime).Milliseconds(),
+		)
 	}
-	return fmt.Sprintf("%s,%s,%d,%d,%d,%d,%d,%d\n",
-		schedType, makeClusterDescriptor(s.cluster), len(s.cluster.nodes), len(s.cluster.incSwitches),
-		s.cluster.totalVertices, s.cluster.totalEdges, s.numPods, s.stopTime.Sub(s.startTime).Milliseconds())
+	return fmt.Sprintf("%s,%s,%d,%d,%d,%d,%d,%d,%d\n",
+		string(s.schedType), makeClusterDescriptor(s.cluster), s.cluster.params.(*FatTreeClusterGenParams).k,
+		len(s.cluster.nodes), len(s.cluster.incSwitches), s.cluster.totalVertices, s.cluster.totalEdges,
+		s.numPods, s.stopTime.Sub(s.startTime).Milliseconds(),
+	)
 }
 
 type MeasurementHelper struct {
@@ -54,7 +75,7 @@ func newMeasurementHelper(t *testing.T, experimentName string) *MeasurementHelpe
 	}	
 }
 
-func (m *MeasurementHelper) Init() {
+func (m *MeasurementHelper) Init(clusterType ClusterType) {
 	if err := os.Mkdir(m.experimentDir, 0774); err != nil {
 		m.t.Fatalf("Failed to create directory for experiment at %s; %v", m.experimentDir, err)
 	}
@@ -63,7 +84,7 @@ func (m *MeasurementHelper) Init() {
 		m.t.Fatalf("Failed to create time measurements file: %v", err)
 	}
 	m.timeFile = f
-	if _, err = m.timeFile.WriteString(scheduligTimeMeasurement{}.CsvHeader()); err != nil {
+	if _, err = m.timeFile.WriteString(scheduligTimeMeasurement{}.CsvHeader(clusterType)); err != nil {
 		m.t.Fatalf("Failed to write header")
 	}
 }
@@ -72,12 +93,12 @@ func (m *MeasurementHelper) Close() {
 	m.timeFile.Close()
 }
 
-func (m *MeasurementHelper) StartMeasurement(cluster *cluster, numPods int, telemetry bool) {
+func (m *MeasurementHelper) StartMeasurement(cluster *cluster, numPods int, schedType SchedulerType) {
 	m.scheduligTimeMeasurement = scheduligTimeMeasurement{
 		cluster: cluster,
 		numPods: numPods,
 		startTime: time.Now(),
-		telemetry: telemetry,
+		schedType: schedType,
 	}
 }
 
@@ -109,20 +130,55 @@ func (m *MeasurementHelper) StopTimeProfiling() {
 }
 
 func makeClusterDescriptor(cluster *cluster) string {
-	return fmt.Sprintf("tree_%d_%d_%d_%d_%f", 
-			cluster.numRackNodes, cluster.numRacks,
-			cluster.numFakeRackExtenders, cluster.numl0ToL1Connections,
-			cluster.telemetrySwitchFraction,
-	)
+	if cluster.T == TREE {
+		params := cluster.params.(*TreeClusterGenParams)
+		return fmt.Sprintf("tree_%d_%d_%d_%d_%f", 
+				params.numRackNodes, params.numRacks,
+				params.numFakeRackExtenders, params.numl0ToL1Connections,
+				params.telemetrySwitchFraction,
+		)
+	}
+	params := cluster.params.(*FatTreeClusterGenParams)
+	return fmt.Sprintf("fat_tree_%d", params.k)
 }
 
+type ClusterGenParams interface {
+	DeepCopy() ClusterGenParams
+}
 
-type cluster struct {
+type TreeClusterGenParams struct {
 	numRackNodes int
 	numRacks int
 	numFakeRackExtenders int
 	numl0ToL1Connections int
 	telemetrySwitchFraction float32
+}
+
+func (t *TreeClusterGenParams) DeepCopy() ClusterGenParams {
+	return &TreeClusterGenParams{
+		numRackNodes: t.numRackNodes,
+		numRacks: t.numRacks,
+		numFakeRackExtenders: t.numFakeRackExtenders,
+		numl0ToL1Connections: t.numl0ToL1Connections,
+		telemetrySwitchFraction: t.telemetrySwitchFraction,
+	}
+}
+
+type FatTreeClusterGenParams struct {
+	k int
+	telemetrySwitchFraction float32
+}
+
+func (t *FatTreeClusterGenParams) DeepCopy() ClusterGenParams {
+	return &FatTreeClusterGenParams{
+		k: t.k,
+		telemetrySwitchFraction: t.telemetrySwitchFraction,
+	}
+}
+
+type cluster struct {
+	params ClusterGenParams
+	T ClusterType
 
 	nodes []*v1.Node
 	incSwitches []*shimv1alpha.IncSwitch
@@ -130,6 +186,8 @@ type cluster struct {
 	programs []*shimv1alpha.P4Program
 	totalVertices int
 	totalEdges int
+
+	zones []string
 }
 
 func (c *cluster) DeepCopy() *cluster {
@@ -146,17 +204,14 @@ func (c *cluster) DeepCopy() *cluster {
 		programsDeepCopy[i] = c.programs[i].DeepCopy()
 	}
 	return &cluster{
-		numRackNodes: c.numRackNodes,
-		numRacks: c.numRacks,
-		numFakeRackExtenders: c.numFakeRackExtenders,
-		numl0ToL1Connections: c.numl0ToL1Connections,
-		telemetrySwitchFraction: c.telemetrySwitchFraction,
+		params: c.params.DeepCopy(),
 		nodes: nodesDeepCopy,
 		incSwitches: incSwitchesDeepCopy,
 		programs: programsDeepCopy,
 		topology: c.topology.DeepCopy(),
 		totalVertices: c.totalVertices,
 		totalEdges: c.totalEdges,
+		zones: c.zones[:],
 	}
 }
 

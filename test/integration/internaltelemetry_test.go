@@ -4,9 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
+	appgroupapi "github.com/diktyo-io/appgroup-api/pkg/apis/appgroup"
+	agv1alpha1 "github.com/diktyo-io/appgroup-api/pkg/apis/appgroup/v1alpha1"
+	ntapi "github.com/diktyo-io/networktopology-api/pkg/apis/networktopology"
+	ntv1alpha1 "github.com/diktyo-io/networktopology-api/pkg/apis/networktopology/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,9 +27,12 @@ import (
 	fwkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	scheconfig "sigs.k8s.io/scheduler-plugins/apis/config"
 	"sigs.k8s.io/scheduler-plugins/pkg/internaltelemetry"
 	"sigs.k8s.io/scheduler-plugins/pkg/internaltelemetry/core"
 	intv1alpha "sigs.k8s.io/scheduler-plugins/pkg/intv1alpha"
+	"sigs.k8s.io/scheduler-plugins/pkg/networkaware/networkoverhead"
+	networkawareutil "sigs.k8s.io/scheduler-plugins/pkg/networkaware/util"
 	shimv1alpha "sigs.k8s.io/scheduler-plugins/pkg/shimv1alpha"
 	"sigs.k8s.io/scheduler-plugins/test/util"
 )
@@ -32,78 +40,101 @@ import (
 const NS = "default"
 
 func TestScheduler(t *testing.T) {
-	retries := 5
-	measurer := newMeasurementHelper(t, "trees_both_scheds")
-	measurer.Init()
+	retries := 1
+	measurer := newMeasurementHelper(t, "fat_tree_3_scheds_1")
+	measurer.Init(FAT_TREE)
 	defer measurer.Close()
 
-	tests := []struct {
+
+	type test_ struct {
 		name    		string
 		numPods1		int
 		numPods2		int
-		clusterBuilder	func () *cluster
-	}{
-		{
-			name: "v0",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(4, 8, 1, 2, 0.4)},
-		},
-		{
-			name: "v1",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(8, 16, 1, 2, 0.4)},
-		},
-		{
-			name: "v3",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(8, 32, 4, 2, 0.4)},
-		},
-		{
-			name: "v5",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(8, 128, 4, 2, 0.4)},
-		},
-		{
-			name: "v6",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(16, 128, 4, 2, 0.4)},
-		},
-		{
-			name: "v7",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(16, 128, 8, 16, 0.4)},
-		},
-		{
-			name: "v8",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(8, 512, 8, 8, 0.4)},
-		},
-		{
-			name: "v10",
-			numPods1: 5,
-			numPods2: 5,
-			clusterBuilder: func() *cluster {return makeCluster(32, 256, 8, 8, 0.4)},
-		},
+		clusterBuilder	func (SchedulerType) *cluster
 	}
-	evalSchedVariant := []bool{false, true}
-	for _, evaluatingTelemerySched := range evalSchedVariant {
+	
+	treeTests := []test_{
+		// {
+		// 	name: "v0",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(4, 8, 1, 2, 0.4)},
+		// },
+		// {
+		// 	name: "v1",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(8, 16, 1, 2, 0.4)},
+		// },
+		// {
+		// 	name: "v3",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(8, 32, 4, 2, 0.4)},
+		// },
+		// {
+		// 	name: "v5",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(8, 128, 4, 2, 0.4)},
+		// },
+		// {
+		// 	name: "v6",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(16, 128, 4, 2, 0.4)},
+		// },
+		// {
+		// 	name: "v7",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(16, 128, 8, 16, 0.4)},
+		// },
+		// {
+		// 	name: "v8",
+		// 	numPods1: 5,
+		// 	numPods2: 5,
+		// 	clusterBuilder: func() *cluster {return makeCluster(8, 512, 8, 8, 0.4)},
+		// },
+		// {
+		// 	name: "v10",
+		// 	numPods1: 10,
+		// 	numPods2: 10,
+		// 	clusterBuilder: func() *cluster {return makeCluster(32, 256, 8, 8, 0.4)},
+		// },
+	}
+
+	fatTreeTests := []test_{}
+
+	// numNodes = (k/2)^2 * k, for k = 40 there is 16k nodes, for k = 32 8192 nodes
+	for k := 4; k < 32; k+=2 {
+		x := k
+		fatTreeTests = append(fatTreeTests, test_{
+			name: fmt.Sprintf("v%d", k),
+			numPods1: 5,
+			numPods2: 5,
+			clusterBuilder: func(st SchedulerType) *cluster {return makeFatTreeCluster(x, 0.4, st)},
+		})
+	}
+
+	_ = treeTests
+	_ = fatTreeTests
+	tests := fatTreeTests
+
+	// evalSchedVariant := []bool{true}
+	// evalSchedVariant := []SchedulerType{SCHED_NETWORK_OVERHEAD}
+	evalSchedVariant := []SchedulerType{SCHED_TELEMETRY, SCHED_NETWORK_OVERHEAD, SCHED_DEFAULT}
+	for _, schedType := range evalSchedVariant {
 		for _, tt := range tests {
 			t.Log(tt.name)
-			baseCluster := tt.clusterBuilder()
+			baseCluster := tt.clusterBuilder(schedType)
 			// _ = baseCluster
 			for i := 0; i < retries; i++ {
 				t.Run(tt.name, func(t *testing.T) {
 					testCtx := &testContext{}
 					testCtx.Ctx, testCtx.CancelFn = context.WithCancel(context.Background())
-					client := initSchemeAndResources(t, testCtx)
-					testCtx = initScheduler(t, evaluatingTelemerySched, testCtx, tt.numPods1 + tt.numPods2)
+					client := initSchemeAndResources(t, testCtx, schedType)
+					testCtx = initScheduler(t, schedType, testCtx, tt.numPods1 + tt.numPods2)
 					syncInformerFactory(testCtx)
 					go testCtx.Scheduler.Run(testCtx.Ctx)
 					defer cleanupTest(t, testCtx)
@@ -116,36 +147,64 @@ func TestScheduler(t *testing.T) {
 							t.Fatalf("Failed to create Node %q: %v", node.Name, err)
 						}
 					}
-					if err := createSdnClusterResources(testCtx.Ctx, client, cluster); err != nil {
-						t.Fatalf("Failed to create cluster resources: %v", err)
-					}
-					defer cleanupSdnShim(t, testCtx, cluster, client)
+
 					d1PodTemplate := makeIntDeplPod("_", "_", "_").Spec
 					d2PodTemplate := makeIntDeplPod("_", "_", "_").Spec
 					depl1 := makeDeployment("depl1", "intdepl", tt.numPods1, d1PodTemplate)
 					depl2 := makeDeployment("depl2", "intdepl", tt.numPods2, d2PodTemplate)
-					intdepl := makeInternalTelemetryDeployment("intdepl", depl1, depl2)
-					if err := createIntDeplResources(testCtx.Ctx, client, intdepl, depl1, depl2); err != nil {
-						t.Fatalf("Failed to create telemetry resources: %v", err)
-					}
 					defer cleanupDeployments(t, testCtx, []*appsv1.Deployment{depl1, depl2})
-					defer cleanupIntdepl(t, testCtx, client, intdepl)
-
-					// setupTimeProfiling("third")
-					measurer.StartMeasurement(cluster, tt.numPods1 + tt.numPods2, evaluatingTelemerySched)
-					pods := []*v1.Pod{}
-					remaningToBeScheduled := map[string]struct{}{}
-					for i := 0; i < int(*depl1.Spec.Replicas) + int(*depl2.Spec.Replicas); i++ {
-						var p *v1.Pod
-						if i % 2 == 0 {
-							p = makePodForDeployment(fmt.Sprintf("%s-%d", depl1.Name, i / 2), depl1)
-						} else {
-							p = makePodForDeployment(fmt.Sprintf("%s-%d", depl2.Name, i / 2), depl2)
+					
+					if schedType == SCHED_TELEMETRY {
+						if err := createSdnClusterResources(testCtx.Ctx, client, cluster); err != nil {
+							t.Fatalf("Failed to create cluster resources: %v", err)
 						}
+						defer cleanupSdnShim(t, testCtx, cluster, client)
+						intdepl := makeInternalTelemetryDeployment("intdepl", depl1, depl2)
+						if err := createIntDeplResources(testCtx.Ctx, client, intdepl, depl1, depl2); err != nil {
+							t.Fatalf("Failed to create telemetry resources: %v", err)
+						}
+						defer cleanupIntdepl(t, testCtx, client, intdepl)
+					} else if schedType == SCHED_NETWORK_OVERHEAD {
+						basicAppGroup, networkTopo := makeAppGroupAndNetworkTopo(tt.numPods1 + tt.numPods2, cluster)
+						cleaner := createNetworkOverheadResources(t, testCtx, client, basicAppGroup, networkTopo)
+						defer cleaner()
+					}
+					pods := []*v1.Pod{}
+					if schedType == SCHED_TELEMETRY {
+						for i := 0; i < tt.numPods1 + tt.numPods2; i++ {
+							var p *v1.Pod
+							if i % 2 == 0 {
+								p = makePodForDeployment(fmt.Sprintf("%s-%d", depl1.Name, i / 2), depl1)
+							} else {
+								p = makePodForDeployment(fmt.Sprintf("%s-%d", depl2.Name, i / 2), depl2)
+							}
+							pods = append(pods, p)
+						}
+					} else {
+						for i := 0; i < tt.numPods1; i++ {
+							pods = append(pods, makePodForDeployment(fmt.Sprintf("%s-%d", depl1.Name, i), depl1))
+							if schedType == SCHED_NETWORK_OVERHEAD {
+								pods[len(pods) - 1].Labels[agv1alpha1.AppGroupLabel] = "basic"
+								pods[len(pods) - 1].Labels[agv1alpha1.AppGroupSelectorLabel] = "p1"
+							}
+						}
+						for i := 0; i < tt.numPods2; i++ {
+							pods = append(pods, makePodForDeployment(fmt.Sprintf("%s-%d", depl2.Name, i), depl2))
+							if schedType == SCHED_NETWORK_OVERHEAD {
+								pods[len(pods) - 1].Labels[agv1alpha1.AppGroupLabel] = "basic"
+								pods[len(pods) - 1].Labels[agv1alpha1.AppGroupSelectorLabel] = "p2"
+							}
+						}
+					}
+
+					// measurer.SetupTimeProfiling()
+					// measurer.SetupMemoryProfiling()
+					measurer.StartMeasurement(cluster, tt.numPods1 + tt.numPods2, schedType)
+					remaningToBeScheduled := map[string]struct{}{}
+					for _, p := range pods {
 						if err := client.Create(testCtx.Ctx, p); err != nil {
 							t.Fatalf("Failed to create pod: %v", err)
 						}
-						pods = append(pods, p)
 						remaningToBeScheduled[p.Name] = struct{}{}
 					}
 					defer cleanupPods(t, testCtx, pods)
@@ -155,8 +214,8 @@ func TestScheduler(t *testing.T) {
 						t.Fatalf("expected doneChan to be closed")
 					}
 					measurer.StopMeasurement()
+					// measurer.StopTimeProfiling()
 
-					// stopTimeProfiling()
 					for podName := range remaningToBeScheduled {
 						if !podScheduled(testCtx.ClientSet, NS, podName) {
 							t.Error("expected all pods to be scheduled")
@@ -168,14 +227,17 @@ func TestScheduler(t *testing.T) {
 	}
 }
 
-func initScheduler(t *testing.T, telemetry bool, testCtx *testContext, numPodsToSchedule int) *testContext {
+func initScheduler(t *testing.T, schedType SchedulerType, testCtx *testContext, numPodsToSchedule int) *testContext {
 	cfg, err := util.NewDefaultSchedulerComponentConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	internaltelemetry.DoneChan = make(chan struct{})
-	if telemetry {
-		internaltelemetry.IsEvaluatingDefaultScheduler = false
+	frameworks := fwkruntime.Registry{
+		internaltelemetry.Name: internaltelemetry.New,
+	}
+	if schedType == SCHED_TELEMETRY {
+		internaltelemetry.IsEvaluatingOtherScheduler = false
 		cfg.Profiles[0].Plugins.PreScore = schedapi.PluginSet{
 			Enabled:  []schedapi.Plugin{{Name: internaltelemetry.Name}},
 			Disabled: []schedapi.Plugin{{Name: "*"}},
@@ -188,48 +250,108 @@ func initScheduler(t *testing.T, telemetry bool, testCtx *testContext, numPodsTo
 		cfg.Profiles[0].Plugins.PostBind.Enabled = append(cfg.Profiles[0].Plugins.PostBind.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
 	} else {
 		// a hack to get it record finished scheduling in the same way as internal telemetry
-		internaltelemetry.IsEvaluatingDefaultScheduler = true
+		internaltelemetry.IsEvaluatingOtherScheduler = true
 		internaltelemetry.ScheduledPods = 0
 		internaltelemetry.PodsToSchedule = numPodsToSchedule
 		cfg.Profiles[0].Plugins.PostBind.Enabled = append(cfg.Profiles[0].Plugins.PostBind.Enabled, schedapi.Plugin{Name: internaltelemetry.Name})
+		if schedType == SCHED_NETWORK_OVERHEAD {
+			cfg.Profiles[0].Plugins.PreFilter.Enabled = append(cfg.Profiles[0].Plugins.PreFilter.Enabled, schedapi.Plugin{Name: networkoverhead.Name})
+			cfg.Profiles[0].Plugins.Filter.Enabled = append(cfg.Profiles[0].Plugins.Filter.Enabled, schedapi.Plugin{Name: networkoverhead.Name})
+			cfg.Profiles[0].Plugins.Score = schedapi.PluginSet{
+				Enabled:  []schedapi.Plugin{{Name: networkoverhead.Name}},
+				Disabled: []schedapi.Plugin{{Name: "*"}},
+			}
+			cfg.Profiles[0].Plugins.PreScore = schedapi.PluginSet{
+				Enabled:  []schedapi.Plugin{},
+				Disabled: []schedapi.Plugin{{Name: "*"}},
+			}
+			cfg.Profiles[0].PluginConfig = append(cfg.Profiles[0].PluginConfig, schedapi.PluginConfig{
+				Name: networkoverhead.Name,
+				Args: &scheconfig.NetworkOverheadArgs{
+					Namespaces:          []string{NS},
+					WeightsName:         "UserDefined",
+					NetworkTopologyName: "nt-test",
+				},
+			})
+			frameworks[networkoverhead.Name] = networkoverhead.New
+		}
 	}
-	testCtx = initTestSchedulerWithOptions(
-		t,
-		testCtx,
+	options := []scheduler.Option{
 		scheduler.WithProfiles(cfg.Profiles...),
-		scheduler.WithFrameworkOutOfTreeRegistry(fwkruntime.Registry{internaltelemetry.Name: internaltelemetry.New}),
-	)
+		scheduler.WithFrameworkOutOfTreeRegistry(frameworks),
+	}
+	testCtx = initTestSchedulerWithOptions(t, testCtx, options...)
 	return testCtx
 }
 
-func initSchemeAndResources(t *testing.T, testCtx *testContext) client.Client {
+func initSchemeAndResources(t *testing.T, testCtx *testContext, schedType SchedulerType) client.Client {
 	cs := clientset.NewForConfigOrDie(globalKubeConfig)
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(intv1alpha.AddToScheme(scheme))
-	utilruntime.Must(shimv1alpha.AddToScheme(scheme))
+	if schedType == SCHED_TELEMETRY {
+		utilruntime.Must(intv1alpha.AddToScheme(scheme))
+		utilruntime.Must(shimv1alpha.AddToScheme(scheme))
+	} else if schedType == SCHED_NETWORK_OVERHEAD {
+		utilruntime.Must(agv1alpha1.AddToScheme(scheme))
+		utilruntime.Must(ntv1alpha1.AddToScheme(scheme))
+	}
+
 	client, err := client.New(globalKubeConfig, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
 	}
 	testCtx.ClientSet = cs
 	testCtx.KubeConfig = globalKubeConfig
-
-	if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (done bool, err error) {
-		groupList, _, err := cs.ServerGroupsAndResources()
-		if err != nil {
-			return false, nil
-		}
-		for _, group := range groupList {
-			if group.Name == "inc.kntp.com" {
-				t.Log("The CRD is ready to serve")
-				return true, nil
+	
+	if schedType == SCHED_TELEMETRY {
+		if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (done bool, err error) {
+			groupList, _, err := cs.ServerGroupsAndResources()
+			if err != nil {
+				return false, nil
 			}
+			for _, group := range groupList {
+				if group.Name == "inc.kntp.com" {
+					t.Log("The CRD is ready to serve")
+					return true, nil
+				}
+			}
+			return false, nil
+		}); err != nil {
+			t.Fatalf("Timed out waiting for CRD to be ready: %v", err)
 		}
-		return false, nil
-	}); err != nil {
-		t.Fatalf("Timed out waiting for CRD to be ready: %v", err)
+	} else if schedType == SCHED_NETWORK_OVERHEAD {
+		if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (done bool, err error) {
+			groupList, _, err := cs.ServerGroupsAndResources()
+			if err != nil {
+				return false, nil
+			}
+			for _, group := range groupList {
+				if group.Name == appgroupapi.GroupName {
+					t.Log("The AppGroup CRD is ready to serve")
+					return true, nil
+				}
+			}
+			return false, nil
+		}); err != nil {
+			t.Fatalf("Timed out waiting for AppGroup CRD to be ready: %v", err)
+		}
+	
+		if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (done bool, err error) {
+			groupList, _, err := cs.ServerGroupsAndResources()
+			if err != nil {
+				return false, nil
+			}
+			for _, group := range groupList {
+				if group.Name == ntapi.GroupName {
+					t.Log("The NetworkTopology CRD is ready to serve")
+					return true, nil
+				}
+			}
+			return false, nil
+		}); err != nil {
+			t.Fatalf("Timed out waiting for Network Topology CRD to be ready: %v", err)
+		}
 	}
 	return client
 }
@@ -371,11 +493,14 @@ func makeCluster(
 	intProgram := makeTelemetryProgram(telemetryProgramName)
 	
 	c := &cluster{
-		numRackNodes: numRackNodes,
-		numRacks: numRacks,
-		numFakeRackExtenders: numFakeRackExtenders,
-		numl0ToL1Connections: numl0ToL1Connections,
-		telemetrySwitchFraction: telemetrySwitchFraction,
+		T: TREE,
+		params: &TreeClusterGenParams{
+			numRackNodes: numRackNodes,
+			numRacks: numRacks,
+			numFakeRackExtenders: numFakeRackExtenders,
+			numl0ToL1Connections: numl0ToL1Connections,
+			telemetrySwitchFraction: telemetrySwitchFraction,
+		},
 		nodes: []*v1.Node{},
 		incSwitches: []*shimv1alpha.IncSwitch{},
 		topology: nil,
@@ -465,6 +590,215 @@ func makeCluster(
 	return c
 }
 
+// https://www.cs.cornell.edu/courses/cs5413/2014fa/lectures/08-fattree.pdf page 12
+// Spanning tree of a fat tree topology, first aggregation-layer switch of
+// each pod is connected to the first core-layer switch.
+// Each edge switch is connected to the first aggregation-layer switch,
+// remaining core-layer switches are unused but each is connected to the
+// second aggregation-layer switch in the corresponding pod.
+func makeFatTreeCluster(k int, telemetrySwitchFraction float32, schedType SchedulerType) *cluster {
+	rng := rand.New(rand.NewSource(42))
+	telemetryProgramName := "telemetry"
+	intProgram := makeTelemetryProgram(telemetryProgramName)
+	
+	c := &cluster{
+		T: TREE,
+		params: &FatTreeClusterGenParams{
+			k: k,
+			telemetrySwitchFraction: telemetrySwitchFraction,
+		},
+		nodes: []*v1.Node{},
+		incSwitches: []*shimv1alpha.IncSwitch{},
+		topology: nil,
+		programs: []*shimv1alpha.P4Program{intProgram},
+		zones: []string{},
+	}
+	vertices := []vertex{}
+	edges := []edge{}
+
+	coreSwitches := []vertex{}
+	for i := 0; i < k; i ++ {
+		name := fmt.Sprintf("s-core-%d", i)
+		v, _ := makeNetDevice(name, rng, 0, telemetryProgramName)
+		coreSwitches = append(coreSwitches, v)
+		vertices = append(vertices, v)
+	}
+	secondAggSwitches := []vertex{}
+
+	for pod := 0; pod < k; pod++ {
+		zoneName := fmt.Sprintf("z%d", pod)
+		c.zones = append(c.zones, zoneName)
+		u := len(vertices)
+		for rack := 0; rack < k / 2; rack++ {
+			edgeV, incSwitch := makeNetDevice(fmt.Sprintf("s-%d-%d-0", pod, rack), rng, telemetrySwitchFraction, telemetryProgramName)
+			if incSwitch != nil {
+				c.incSwitches = append(c.incSwitches, incSwitch)
+			}
+			vertices = append(vertices, edgeV)
+			aggSwitchName := fmt.Sprintf("s-%d-%d-1", pod, rack)
+			var aggV vertex
+			if rack == 0 {
+				// only this switch will route the traffic from this pod so other shouldn't have telemetry 
+				aggV, incSwitch = makeNetDevice(aggSwitchName, rng, telemetrySwitchFraction, telemetryProgramName)
+				if incSwitch != nil {
+					c.incSwitches = append(c.incSwitches, incSwitch)
+				}
+			} else {
+				aggV, _ = makeNetDevice(aggSwitchName, rng, 0, telemetryProgramName)
+			}
+			vertices = append(vertices, aggV)
+			edges = append(edges, edge{edgeV.name, aggV.name})
+			if rack == 1 {
+				secondAggSwitches = append(secondAggSwitches, aggV)
+			}
+			if rack > 0 {
+				edges = append(edges, edge{vertices[u+1].name, edgeV.name})
+			}
+			for i := 0; i < k / 2; i++ {
+				name := fmt.Sprintf("n-%d-%d-%d", pod, rack, i)
+				node := makeNode(name)
+				if schedType == SCHED_NETWORK_OVERHEAD {
+					node.Labels["node"] = name
+					node.Labels["topology.kubernetes.io/region"] = "r1"
+					node.Labels["topology.kubernetes.io/zone"] = zoneName
+				}
+				c.nodes = append(c.nodes, node)
+				vertices = append(vertices, vertex{
+					name: name,
+					deviceType: shimv1alpha.NODE,
+				})
+				edges = append(edges, edge{name, edgeV.name})
+			}
+		}
+		edges = append(edges, edge{coreSwitches[0].name, vertices[u+1].name})
+	}
+	for i := 1; i < k; i++ {
+		edges = append(edges, edge{coreSwitches[i].name, secondAggSwitches[i].name})
+	}
+
+	c.topology = makeTestTopology(vertices, edges)
+	c.totalVertices = len(vertices)
+	c.totalEdges = len(edges)
+	return c
+}
+
+func makeZoneCosts(zones []string) ntv1alpha1.OriginList {
+	res := ntv1alpha1.OriginList{}
+	for i, z := range zones {
+		costs := []ntv1alpha1.CostInfo{}
+		for j, zz := range zones {
+			if i == j {
+				continue
+			}
+			costs = append(costs, ntv1alpha1.CostInfo{
+				Destination: zz,
+				NetworkCost: 5,
+			})
+		}
+		res = append(res, ntv1alpha1.OriginInfo{
+			Origin: z,
+			CostList: costs,
+		})
+	}
+	return res
+}
+
+type Cleaner func ()
+
+func makeAppGroupAndNetworkTopo(numPods int, cluster *cluster) (*agv1alpha1.AppGroup, *ntv1alpha1.NetworkTopology) {
+	basicAppGroup := MakeAppGroup(NS, "basic").Spec(
+		agv1alpha1.AppGroupSpec{
+			NumMembers:               int32(numPods),
+			TopologySortingAlgorithm: "KahnSort",
+			Workloads: agv1alpha1.AppGroupWorkloadList{
+				agv1alpha1.AppGroupWorkload{
+					Workload: agv1alpha1.AppGroupWorkloadInfo{Kind: "Deployment", Name: "p1", Selector: "p1", APIVersion: "apps/v1", Namespace: NS},
+					Dependencies: agv1alpha1.DependenciesList{agv1alpha1.DependenciesInfo{
+						Workload: agv1alpha1.AppGroupWorkloadInfo{Kind: "Deployment", Name: "p2", Selector: "p2", APIVersion: "apps/v1", Namespace: NS}}}},
+				agv1alpha1.AppGroupWorkload{
+					Workload: agv1alpha1.AppGroupWorkloadInfo{Kind: "Deployment", Name: "p2", Selector: "p2", APIVersion: "apps/v1", Namespace: NS}},
+			},
+		},
+	).Status(agv1alpha1.AppGroupStatus{
+		RunningWorkloads:  2,
+		ScheduleStartTime: metav1.Time{time.Now()}, TopologyCalculationTime: metav1.Time{time.Now()},
+		TopologyOrder: agv1alpha1.AppGroupTopologyList{
+			agv1alpha1.AppGroupTopologyInfo{
+				Workload: agv1alpha1.AppGroupWorkloadInfo{Kind: "Deployment", Name: "p1", Selector: "p1", APIVersion: "apps/v1", Namespace: NS}, Index: 1},
+			agv1alpha1.AppGroupTopologyInfo{
+				Workload: agv1alpha1.AppGroupWorkloadInfo{Kind: "Deployment", Name: "p2", Selector: "p2", APIVersion: "apps/v1", Namespace: NS}, Index: 2},
+		},
+	},
+	).Obj()
+
+	// Sort Topology order in AppGroup CR
+	sort.Sort(networkawareutil.ByWorkloadSelector(basicAppGroup.Status.TopologyOrder))
+
+	// Create Network Topology CR: nt-test
+	networkTopology := MakeNetworkTopology(NS, "nt-test").Spec(
+		ntv1alpha1.NetworkTopologySpec{
+			Weights: ntv1alpha1.WeightList{
+				ntv1alpha1.WeightInfo{Name: "UserDefined", TopologyList: ntv1alpha1.TopologyList{
+					ntv1alpha1.TopologyInfo{
+						TopologyKey: "topology.kubernetes.io/region",
+						OriginList: ntv1alpha1.OriginList{
+							ntv1alpha1.OriginInfo{Origin: "r1", CostList: []ntv1alpha1.CostInfo{}},
+						}},
+					ntv1alpha1.TopologyInfo{
+						TopologyKey: "topology.kubernetes.io/zone",
+						OriginList: makeZoneCosts(cluster.zones),
+					},
+				}},
+			},
+			ConfigmapName: "netperf-metrics",
+		}).Status(ntv1alpha1.NetworkTopologyStatus{}).Obj()
+	return basicAppGroup, networkTopology
+}
+
+func createNetworkOverheadResources(
+	t *testing.T, 
+	testCtx *testContext,
+	client_ client.Client,
+	ag *agv1alpha1.AppGroup,
+	nt *ntv1alpha1.NetworkTopology,
+) Cleaner {
+	err := client_.Create(testCtx.Ctx, nt.DeepCopy())
+	if err != nil {
+		t.Fatalf("Failed to create network topology: %v", err)
+		return nil
+	}
+	err = client_.Create(testCtx.Ctx, ag.DeepCopy())
+	if err != nil {
+		t.Fatalf("Failed to create appgroup: %v", err)
+		return nil
+	}
+
+	return func () {
+		err := client_.Delete(testCtx.Ctx, ag.DeepCopy())
+		if err != nil {
+			t.Fatalf("failed to delete app group: %v", err)
+		}
+		err = client_.Delete(testCtx.Ctx, nt.DeepCopy())
+		if err != nil {
+			t.Fatalf("failed to delete network topology: %v", err)
+		}
+		if err := wait.Poll(time.Millisecond, wait.ForeverTestTimeout,
+			func() (done bool, err error) {
+				ntt := &ntv1alpha1.NetworkTopology{}
+				if err := client_.Get(testCtx.Ctx, client.ObjectKeyFromObject(nt), ntt); err != nil {
+					if apierrors.IsNotFound(err) {
+						return true, nil
+					}
+					return false, err
+				}
+				return false, nil
+			}); err != nil {
+			t.Errorf("error while waiting for network topology  %s/%s to get deleted: %v", nt.Namespace, nt.Name, err)
+		}
+	}
+}
+
+
 // incSwitch is nil if rng returns > telemetryProbability
 func makeNetDevice(
 	name string,
@@ -492,6 +826,7 @@ func makeNode(name string) *v1.Node {
 		v1.ResourceMemory: resource.MustParse("1Gi"),
 		v1.ResourceCPU:    *resource.NewQuantity(12, resource.DecimalSI),
 	}
+	node.Labels = make(map[string]string)
 	return node
 }
 

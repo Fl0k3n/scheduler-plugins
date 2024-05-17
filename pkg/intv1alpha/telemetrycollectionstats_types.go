@@ -56,6 +56,7 @@ type MetricsSummary struct {
 	TotalReports int `json:"totalReports"`
 	TimeWindowsSeconds int `json:"timeWindowsSeconds"`
     WindowMetrics Metrics `json:"windowMetrics"`
+	CreatedAt int64 `json:"createdAt"`
 }
 
 // TelemetryCollectionStatsStatus defines the observed state of TelemetryCollectionStats

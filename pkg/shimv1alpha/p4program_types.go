@@ -35,7 +35,7 @@ type P4ProgramSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	Artifacts []ProgramArtifacts `json:"artifacts"`
-	ImplementedInterfaces []string `json:"implements"`
+	ImplementedInterfaces []string `json:"implements,omitempty"`
 }
 
 // P4ProgramStatus defines the observed state of P4Program

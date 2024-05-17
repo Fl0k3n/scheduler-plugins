@@ -27,7 +27,7 @@ const (
 var DoneChan = make(chan struct{})
 var PodsToSchedule = 0
 var ScheduledPods = 0
-var IsEvaluatingDefaultScheduler = false
+var IsEvaluatingOtherScheduler = false
 
 type TelemetryCycleState struct {
 	Network *core.Network
@@ -253,7 +253,7 @@ func (t *InternalTelemetry) PostBind(
 	nodeName string,
 ) {
 	// TODO this is for evaluation purposes and should be deleted
-	if IsEvaluatingDefaultScheduler {
+	if IsEvaluatingOtherScheduler {
 		ScheduledPods++
 		if ScheduledPods == PodsToSchedule {
 			close(DoneChan)

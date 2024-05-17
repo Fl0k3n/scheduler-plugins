@@ -19,35 +19,28 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+const KindaSDN SDNType = "kinda-sdn"
+const (
+	ConditionTypeSdnConnected = "SdnConnected"
+	ConditionTypeNetworkReconciled = "NetworkReconciled"
+)
 
 type SDNType string 
-
-const (
-	KindaSDN SDNType = "kinda-sdn"
-)
 
 type SDNConfig struct {
 	SdnType SDNType `json:"type"`
 	SdnGrpcAddr string `json:"grpcAddr"`
 	TelemetryServiceGrpcAddr string `json:"telemetryServiceGrpcAddr,omitempty"`
-	// Params map[string]interface{} `json:"params,omitempty"`
 }
-
-// SDNShimSpec defines the desired state of SDNShim
 type SDNShimSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	SdnConfig SDNConfig `json:"sdn"`
 }
+const (
+	TypeAvailableCollector = "Available"
+)
 
-// SDNShimStatus defines the observed state of SDNShim
 type SDNShimStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 //+kubebuilder:object:root=true
